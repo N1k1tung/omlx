@@ -1514,6 +1514,21 @@ class BlockAwarePrefixCache(CacheManager):
             )
             self._update_prefix_index(tokens, indexed_ids, extra_keys=extra_keys)
 
+        # Sub-block Cache lifecycle: tails are memory-tier entries (see
+        # PagedSSDCacheManager.save_block), so a superseded tail would
+        # otherwise linger in the hot tier as a dead full-state copy and
+        # accumulate one entry per turn until LRU pressure evicts live
+        # blocks. Drop the previous tail of this chain once the new store
+        # commits — restore only ever consumes the newest tail. The walk-back
+        # fallback role the old copy played is covered by re-prefilling the
+        # sub-block remainder from the last full block.
+        if (
+            tail_in_table
+            and superseded_tail_hash is not None
+            and superseded_tail_hash in self._tail_hashes
+        ):
+            self._discard_tail_block(superseded_tail_hash)
+
         # Store entry for request tracking
         self._request_tables[request_id] = BlockCacheEntry(
             block_table=block_table,
@@ -1929,6 +1944,9 @@ class BlockAwarePrefixCache(CacheManager):
                     "Failed to delete superseded tail block %s", block_hash.hex()[:16]
                 )
         self._tail_hashes.discard(block_hash)
+        # Also drop the tail-index entry so the discarded tail hash stops
+        # shadowing the live chain in later tail matches.
+        self.paged_cache.remove_tail_index_entry(block_hash)
         return True
 
     def _strip_rotating_payload(self, block_hash: bytes) -> bool:

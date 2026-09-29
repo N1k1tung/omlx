@@ -1868,10 +1868,18 @@ class PagedSSDCacheManager(CacheManager):
     def _handle_hot_cache_eviction(self, block_hash: bytes, entry: dict) -> None:
         self._stats["hot_cache_evictions"] += 1
         if not entry.get("dirty", True):
-            logger.debug(
-                "Evicted clean hot cache block %s; SSD copy already exists",
-                block_hash.hex()[:16],
-            )
+            blk_meta = entry.get("block_metadata")
+            if getattr(blk_meta, "tail_terminal", False):
+                logger.debug(
+                    "Evicted memory-tier tail block %s; sub-block tails are "
+                    "not persisted and are re-prefilled on the next request",
+                    block_hash.hex()[:16],
+                )
+            else:
+                logger.debug(
+                    "Evicted clean hot cache block %s; SSD copy already exists",
+                    block_hash.hex()[:16],
+                )
             return
         self._enqueue_ssd_write(block_hash, entry)
 
@@ -3300,6 +3308,22 @@ class PagedSSDCacheManager(CacheManager):
                 self._hot_cache_remove(block_hash)
                 self._stats["hits"] += 1
                 return True
+            if tail_terminal:
+                # Sub-block Cache: an off-grid tail is a memory-tier entry,
+                # never an indexed SSD block. Its payload is retained in the
+                # hot cache as a clean entry, so hot-cache eviction drops it
+                # silently instead of persisting a full chunk-sized state
+                # write for a partial block. Once evicted (or after restart)
+                # the tail is simply absent and the next request cheaply
+                # re-prefills the sub-block remainder from the last full
+                # block. Without a hot cache there is no memory tier to keep
+                # it in, so a tail is not cacheable at all.
+                if not self._hot_cache_enabled:
+                    return False
+                self._hot_cache_put(block_hash, {**cache_entry, "dirty": False})
+                self._stats["saves"] += 1
+                return True
+
             return False
 
         file_path = self._get_file_path(block_hash)

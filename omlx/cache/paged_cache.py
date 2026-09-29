@@ -1206,6 +1206,21 @@ class PagedCacheManager(CacheManager):
             seeded += 1
         return seeded
 
+    def remove_tail_index_entry(self, tail_hash: BlockHash) -> None:
+        """Remove one tail hash from every parent bucket of the tail index.
+
+        Called when a tail block is discarded so a later tail match under the
+        same parent cannot resolve to the dead hash.
+        """
+        with self._lock:
+            empty_parents = []
+            for parent_hash, tails in self._tail_index.items():
+                tails.pop(tail_hash, None)
+                if not tails:
+                    empty_parents.append(parent_hash)
+            for parent_hash in empty_parents:
+                self._tail_index.pop(parent_hash, None)
+
     def _match_tail_block(
         self,
         token_ids: List[int],

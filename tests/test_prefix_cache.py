@@ -1982,8 +1982,10 @@ class TestArraysCacheLastBlockOnly:
         """A request that reused a tail stores its own blocks on the grid.
 
         The fetched tail is released from the table before the new blocks
-        are laid out, so the next full block chains to the last full block
-        and the old tail stays cached for other requests."""
+        are laid out, so the next full block chains to the last full block.
+        The superseded tail is then discarded (Sub-block Cache lifecycle:
+        only the newest tail of a chain stays cached), so the tail index
+        keeps the latest tail under the new parent and drops the old one."""
         from omlx.cache.paged_cache import compute_block_hash
 
         cache, paged_cache, mock_ssd, config = self._tail_fixture(mx)
@@ -2029,9 +2031,10 @@ class TestArraysCacheLastBlockOnly:
             blocks[1].block_hash, [8, 9, 10], model_name="test-model"
         )
         old_tail = paged_cache.cached_block_hash_to_block.get_block(old_tail_hash)
-        assert old_tail is not None and old_tail.ref_count == 0
-        assert old_tail.block_id not in second.block_ids
-        assert old_tail_hash in paged_cache._tail_index[blocks[0].block_hash]
+        # Supersede-on-extend discards the old tail (Sub-block Cache keeps a
+        # single memory-tier tail per chain).
+        assert old_tail is None
+        assert old_tail_hash not in cache._tail_hashes
         assert blocks[2].block_hash in paged_cache._tail_index[blocks[1].block_hash]
 
     def test_store_cache_tail_dedup_reuses_existing_block(self, mx):

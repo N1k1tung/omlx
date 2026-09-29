@@ -543,8 +543,10 @@ def test_superseded_tail_deleted_two_extensions_later(tmp_path):
     t2 = store_turn("turn-2", 10)
     tail2 = _block_hash(cache, t2, -1)
     assert cache._rotating_tip_lineage.get(tail2) == tail1
-    # The immediate previous tail stays as the walk-back fallback.
-    assert ssd.has_block(tail1)
+    # Sub-block Cache lifecycle: the superseded tail is discarded as soon as
+    # the new store commits (restore re-prefills the remainder instead of
+    # walking back over a dead memory-tier copy).
+    assert not ssd.has_block(tail1)
     assert _rotating_layer_shape(ssd, tail2) == REAL_ROTATING_SHAPE
 
     table, remaining = fetch_turn("turn-3", 14)
@@ -552,11 +554,14 @@ def test_superseded_tail_deleted_two_extensions_later(tmp_path):
     t3 = store_turn("turn-3", 14)
     tail3 = _block_hash(cache, t3, -1)
     assert cache._rotating_tip_lineage.get(tail3) == tail2
-    # Two generations back: gone from every tier, not merely stripped.
+    # Every earlier tail is gone from every tier — each store supersedes the
+    # previous one (Sub-block Cache keeps a single memory-tier tail per
+    # chain) and the walk-back fallback role is covered by re-prefilling
+    # the sub-block remainder from the last full block.
     assert not ssd.has_block(tail1)
+    assert not ssd.has_block(tail2)
     assert cache.paged_cache.cached_block_hash_to_block.get_block(tail1) is None
     assert tail1 not in cache._tail_hashes
-    assert ssd.has_block(tail2)
     assert ssd.has_block(tail3)
 
     # A lookup on the old branch prunes the stale tail entry and stops at
