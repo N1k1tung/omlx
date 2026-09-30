@@ -870,9 +870,9 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
             and target_capabilities is not None
             and not target_capabilities.supports_prefix_snapshot
         ):
-            # Do not advertise or initialize an inert cache. GLM-5.3's DSA
-            # layers use CacheList(KVCache, PoolingCache), which the pinned
-            # dflash snapshot codec cannot serialize.
+            # Do not advertise or initialize an inert cache. Backends whose
+            # cache structures the pinned dflash snapshot codec cannot
+            # serialize report this through TargetCapabilities.
             logger.warning(
                 "DFlash prefix snapshots are not supported by target backend %s; "
                 "disabling DFlash L1/L2 cache for this load",

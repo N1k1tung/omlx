@@ -30,9 +30,12 @@ This module provides:
   -- backend registration and the class-hook lifecycle shared with the
   other oMLX DFlash adapters.
 
-The adapter fails closed: prefix snapshots (the dflash L1/L2 cache), DDTree
-verification, verify-linear kernels and target KV quantization are refused
-rather than silently approximated.
+The adapter fails closed: DDTree verification, verify-linear kernels and target
+KV quantization are refused rather than silently approximated. Prefix snapshots
+(the dflash L1/L2 cache) are supported through oMLX's snapshot-codec extension
+(``dflash_lifecycle._install_glm_dfa_serializer``), which teaches dflash-mlx's
+``serialize_target_cache`` GLM's composite DSA cache entries; restores rebuild
+them through :func:`hydrate_glm_dsa_cache`.
 """
 
 from __future__ import annotations
@@ -119,6 +122,90 @@ def _contract_mhc_hidden(hidden: mx.array) -> mx.array:
     if hidden.ndim != 3:
         raise ValueError(f"Unexpected GLM hidden-state rank: {hidden.ndim}")
     return hidden
+
+
+def _cache_components(cache_entry: Any) -> tuple[Any, ...]:
+    """Sub-caches of a GLM DSA composite entry (``CacheList.caches``)."""
+    return tuple(getattr(cache_entry, "caches", ()) or ())
+
+
+def _is_glm_dsa_cache(cache_entry: Any) -> bool:
+    """True for the ``CacheList(KVCache, PoolingCache)`` DSA layer entries.
+
+    Matched by structure (a KV-ish first component plus a pooling second)
+    rather than a strict ``CacheList`` import so the VLM and mlx-lm cache
+    modules — and future flavors — serialize through the same branch.
+    """
+    components = _cache_components(cache_entry)
+    if len(components) != 2:
+        return False
+    kv_cache, pool_cache = components
+    if not hasattr(kv_cache, "keys") or not hasattr(kv_cache, "offset"):
+        return False
+    if not hasattr(pool_cache, "state") or not hasattr(pool_cache, "ratio"):
+        return False
+    if type(pool_cache).__name__ not in ("PoolingCache", "BatchPoolingCache"):
+        return False
+    return "caches" in dir(cache_entry) or hasattr(cache_entry, "caches")
+
+
+def hydrate_glm_dsa_cache(snapshot: Any, template_cache: Any, layer_idx: int) -> Any:
+    """Rebuild one GLM DSA cache from snapshot slots (see the lifecycle wrap)."""
+    from mlx_lm.models.cache import CacheList
+
+    fa_state = snapshot.fa_states[layer_idx]
+    gdn_state = snapshot.gdn_states[layer_idx]
+    if fa_state is None or gdn_state is None:
+        raise ValueError(f"Snapshot missing GLM DSA cache state at layer {layer_idx}")
+    components = _cache_components(template_cache)
+    kv_cache = components[0]
+    pool_cache = components[1] if len(components) > 1 else None
+    if pool_cache is None or not hasattr(pool_cache, "state"):
+        raise TypeError(
+            f"GLM DSA template cache at layer {layer_idx} is not a composite"
+        )
+    keys, values, offset = fa_state[:3]
+    if int(keys.shape[2]) != int(offset) or int(values.shape[2]) != int(offset):
+        raise ValueError(
+            f"Snapshot GLM DFA arrays at layer {layer_idx} are not exact-length "
+            f"(keys={int(keys.shape[2])}, values={int(values.shape[2])}, "
+            f"offset={int(offset)}); cannot adopt"
+        )
+    kv_cache.keys = keys
+    kv_cache.values = values
+    kv_cache.offset = int(offset)
+    pool_state = tuple(gdn_state)
+    base_arity = len(pool_cache.state)
+    if len(pool_state) < base_arity:
+        raise ValueError(
+            f"Snapshot GLM DFA pool state at layer {layer_idx} has "
+            f"{len(pool_state)} arrays; the pool expects {base_arity}"
+        )
+    pool_cache.state = pool_state[:base_arity]
+    # The template's PoolingCache was built by make_cache with the layer's own
+    # index_kpool ratio, so its meta_state is already correct — only the state
+    # arrays are adopted from the snapshot.
+    if len(pool_state) > base_arity:
+        # The undo tail mirrors PoolingCache._undo[5:] = (kv, gate, prev_kv,
+        # prev_gate); the head slots (buf_kv, buf_gate, remainder, pooled_prev)
+        # are rebuilt from the restored state itself so the undo matches the
+        # arrays the restored cache actually holds.
+        tail = pool_state[base_arity:]
+        head = list(pool_state[:base_arity])
+        undo = [None] * (5 + len(tail))
+        undo[0] = head[0]
+        undo[1] = head[1]
+        undo[2] = pool_cache.remainder
+        undo[3] = pool_cache.pooled
+        undo[4] = None
+        for slot, value in enumerate(tail, start=5):
+            undo[slot] = value
+        pool_cache._undo = tuple(undo)
+        pool_cache._undo_chain = False
+    else:
+        pool_cache._undo = None
+        pool_cache._undo_chain = False
+    return CacheList(kv_cache, pool_cache)
 
 
 def validate_glm5_dflash_pair(
@@ -270,9 +357,10 @@ class Glm5NextTargetOps:
             supports_dflash=True,
             supports_recurrent_rollback=True,
             supports_kv_trim=True,
-            # dflash-mlx's snapshot codec only serializes bare KVCache and its
-            # own recurrent cache; GLM DSA layers use CacheList(KV, Pooling).
-            supports_prefix_snapshot=False,
+            # The snapshot codec gains GLM DSA composite entries through oMLX's
+            # serializer wrap (installed with the backend); KDA layers ride the
+            # runtime's own recurrent-cache slot.
+            supports_prefix_snapshot=True,
             supports_rotating_cache_snapshot=False,
             supports_shared_kv=False,
             supports_target_hidden_capture=True,
@@ -572,7 +660,7 @@ class Glm5NextTargetOps:
     @staticmethod
     def _clear_composite_undo(cache_entry: Any) -> None:
         """Drop accepted verify-block undo arrays retained by PoolingCache."""
-        for component in getattr(cache_entry, "caches", ()):
+        for component in _cache_components(cache_entry):
             if hasattr(component, "_undo"):
                 component._undo = None
             if hasattr(component, "_undo_chain"):
@@ -647,6 +735,7 @@ class Glm5NextTargetOps:
             if trim_count <= 0:
                 if fully_accepted:
                     self._clear_composite_undo(cache_entry)
+                changed = True
                 continue
             trim = getattr(cache_entry, "trim", None)
             if not callable(trim):
@@ -669,6 +758,11 @@ class Glm5NextTargetOps:
         for entry in target_cache:
             if isinstance(entry, RecurrentRollbackCache):
                 self._clear_glm_recurrent_transients(entry)
+            elif _is_glm_dsa_cache(entry):
+                # Drop any undo log a final acceptance left behind so an L2
+                # snapshot writer never reaches arrays the live pool could
+                # still rewrite (the undo pins pre-acceptance rows).
+                self._clear_composite_undo(entry)
         draft_cache.clear()
         target_cache.clear()
 
@@ -755,8 +849,14 @@ def load_glm5_target_bundle(
 
 
 def install_dflash_glm5_backend() -> bool:
-    """Register the GLM target ops in dflash-mlx's backend registry."""
+    """Register the GLM target ops and snapshot-serializer extension in dflash-mlx."""
     from dflash_mlx.engine import target_ops
+
+    # Teach dflash's snapshot codec about GLM's composite DSA cache entries
+    # before any target (or snapshot) is loaded.
+    from .dflash_lifecycle import install_dflash_lifecycle_wrap
+
+    install_dflash_lifecycle_wrap()
 
     if _BACKEND_PATH in target_ops.TARGET_BACKENDS:
         return False
@@ -767,6 +867,7 @@ def install_dflash_glm5_backend() -> bool:
 __all__ = [
     "GLM5_MODEL_TYPES",
     "Glm5NextTargetOps",
+    "hydrate_glm_dsa_cache",
     "install_dflash_glm5_backend",
     "is_glm5_dflash_target",
     "is_glm5_model_type",
