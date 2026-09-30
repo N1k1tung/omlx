@@ -18,11 +18,13 @@ from dflash_mlx.cache.codecs import (
 )
 from dflash_mlx.cache.snapshot import TargetHiddenChunks, validate_prefix_snapshot
 from dflash_mlx.cache.snapshot_service import SnapshotPublication
-from dflash_mlx.engine.prefill import snapshot_covers_prefix
+from dflash_mlx.engine.prefill import snapshot_covers_prefix, spans_cover_prefix
 from dflash_mlx.engine.spec_epoch import resolve_full_context_draft_layers
 from dflash_mlx.server.prefix_cache_flow import PrefixCacheFlow
 from dflash_mlx.server.prefix_cache_manager import build_prefix_key
 
+from omlx.cache.deepseek_v41_delta import compact_snapshot as compact_deepseek_v41_snapshot
+from omlx.cache.pooling_delta import compact_pooling_cache_snapshot
 from omlx.cache.paged_cache import PagedCacheManager
 from omlx.cache.paged_ssd_cache import (
     PagedSSDCacheManager,
@@ -118,7 +120,11 @@ class NativeCacheTargetOps:
 
 
 def install_native_cache_hooks():
-    """Limit the pinned runtime adaptation to sessions using the native service."""
+    """Install idempotent process-lifetime hooks scoped to native sessions.
+
+    They stay installed across model unloads; non-native sessions delegate
+    to the pinned runtime unchanged.
+    """
     from dflash_mlx.engine.spec_epoch import SpeculativeSession
 
     if getattr(SpeculativeSession, "_omlx_native_cache", False):
@@ -190,7 +196,23 @@ def install_native_cache_hooks():
                     yield event
             finally:
                 iterator.close()
-            result.feature_store.freeze_prefill_for_snapshot(
+            features = result.feature_store
+            chunks, spans, total_len = _build_target_hidden_chunks(
+                features.require_current_hidden(),
+                draft_model=self.draft_model,
+                draft_sink_size=self.draft_sink_size,
+                draft_window_size=self.draft_window_size,
+                allow_full_attention_context=self.allow_full_context_draft_layers,
+                clone=False,
+            )
+            if spans != ((0, total_len),):
+                # Copies release the full prompt allocation during decode; slices pin it.
+                chunks = tuple(
+                    mx.take(chunk, mx.arange(chunk.shape[1]), axis=1) for chunk in chunks
+                )
+                mx.eval(*chunks)
+                features._current_hidden = TargetHiddenChunks(total_len, chunks, spans)
+            features.freeze_prefill_for_snapshot(
                 enabled=request.should_collect_generation_snapshot_hidden(
                     self.supports_prefix_snapshot
                 )
@@ -334,12 +356,15 @@ class DFlashNativeCache:
             self.ssd.close()
             raise
 
-    def _lookup(self, tokens):
+    def _lookup(self, tokens, *, reconstruct=True):
         request_id = uuid.uuid4().hex
         try:
             table, _ = self.prefix.fetch_cache(request_id, tokens)
-            if table is None:
+            if table is None or not table.num_tokens or not table.block_ids:
                 return None
+            if not reconstruct:
+                block = self.paged.allocated_blocks[table.block_ids[-1]]
+                return table.num_tokens, block.block_hash, None
             caches = self.prefix.reconstruct_cache(table, promote_to_hot_cache=False)
             if caches:
                 caches = restore_cache(
@@ -406,7 +431,7 @@ class DFlashNativeCache:
         )
         snapshot = None
         ready_from = 0
-        found = self._lookup(prompt)
+        found = self._lookup(prompt, reconstruct=False)
         if found is not None:
             n, tip, caches = found
             context = self.ssd.load_prefix_context(tip, signature)
@@ -425,12 +450,19 @@ class DFlashNativeCache:
                         for c in chunks
                     ):
                         raise ValueError("context tensor layout mismatch")
-                    hidden = TargetHiddenChunks(n, chunks, spans)
-                    if allow_full or window <= 0:
-                        hidden.slice(0, n)
-                    else:
-                        hidden.slice(0, min(sink, n))
-                        hidden.slice(max(0, n - window), n)
+                    TargetHiddenChunks(n, chunks, spans)  # validate tensor/span shapes
+                    required = (
+                        ((0, n),) if allow_full or window <= 0
+                        else ((0, min(sink, n)), (max(0, n - window), n))
+                    )
+                    if any(
+                        not spans_cover_prefix(
+                            ((lo - start, hi - start) for lo, hi in spans if hi > start),
+                            end - start,
+                        )
+                        for start, end in required
+                    ):
+                        raise ValueError("context spans do not cover the drafter window")
                     logits = tensors.get("logits")
                     if logits is not None and (
                         logits.ndim != 2 or logits.shape[0] != 1
@@ -452,6 +484,12 @@ class DFlashNativeCache:
                         snapshot = None
                 except (KeyError, TypeError, ValueError):
                     snapshot = None
+        if snapshot is not None:
+            restored = self._lookup(prompt[:snapshot.prefix_len])
+            if restored is None or restored[0] != snapshot.prefix_len:
+                snapshot = None
+            else:
+                snapshot.target_cache = restored[2]
         if snapshot is None and window > 0 and not allow_full:
             # A target-only entry can skip a prefix while recomputing a complete
             # drafter window and recovering real sink features separately.
@@ -540,7 +578,11 @@ class DFlashNativeCache:
         return report
 
     def memory_waterfall_bytes(self):
-        return {"prefix_cache": self.ssd.get_stats_dict()["hot_cache_size_bytes"]}
+        stats = self.ssd.get_stats_dict()
+        return {
+            "l1_snapshot_bytes": stats["hot_cache_size_bytes"],
+            "l2_disk_bytes": stats["total_size"],
+        }
 
     def close(self):
         self.ssd.close()
@@ -562,7 +604,9 @@ class NativeSnapshotService:
         self.active = True
 
     def should_publish_frontier(self, prefix_len):
-        return prefix_len > 0 and prefix_len % self.cache.block_size == 0
+        # The target proxy already stores every boundary. Keep drafter context
+        # at request checkpoints; intermediate hits can replay their window.
+        return False
 
     def store_target(self, token_ids, target_cache):
         n = len(token_ids)
@@ -572,8 +616,11 @@ class NativeSnapshotService:
         states, model_config = extract_cache_states(target_cache, self.cache.model_name)
         if not states:
             return None
+        started = time.perf_counter()
         request_id = uuid.uuid4().hex
         try:
+            compact_pooling_cache_snapshot(states, n, self.cache.block_size)
+            compact_deepseek_v41_snapshot(states, n, self.cache.block_size)
             self.cache.prefix.fetch_cache(request_id, token_ids)
             boundaries = {n: states}
             if self.cache.boundary_store is not None:
@@ -612,6 +659,7 @@ class NativeSnapshotService:
             self.cache.prefix.release_cache(request_id)
             if self.cache.boundary_store is not None:
                 self.cache.boundary_store.cleanup_request(request_id)
+            self.insert_ms += (time.perf_counter() - started) * 1000
 
     def publish(
         self,
@@ -625,9 +673,15 @@ class NativeSnapshotService:
         allow_full_attention_context,
         from_snapshot=False,
         snap_prefix_len=0,
+        require_logits=False,
         **kwargs,
     ):
+        if target_hidden is None:
+            return None
+        if require_logits and last_logits is None:
+            raise ValueError(f"{kind} snapshot requires last_logits")
         started = time.perf_counter()
+        previous_insert_ms = self.insert_ms
         admitted = False
         try:
             tip = self.store_target(token_ids, target_cache)
@@ -654,7 +708,7 @@ class NativeSnapshotService:
         except (OSError, ValueError, TypeError, RuntimeError) as exc:
             logger.warning("DFlash native cache publication failed: %s", exc)
         elapsed = (time.perf_counter() - started) * 1000
-        self.insert_ms += elapsed
+        self.insert_ms = previous_insert_ms + elapsed
         return SnapshotPublication(
             kind,
             snapshot_boundary,

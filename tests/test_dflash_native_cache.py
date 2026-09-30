@@ -198,7 +198,7 @@ def test_repeat_and_restart(setup, n):
 
 
 @pytest.mark.parametrize("sink", [0, 2])
-def test_native_entry_without_features_replays_window(setup, sink):
+def test_native_entry_without_features_replays_window(setup, sink, monkeypatch):
     cache, draft, backend, provider, context = setup
     from dataclasses import replace
 
@@ -217,13 +217,22 @@ def test_native_entry_without_features_replays_window(setup, sink):
             logits_last_only=True,
         )
         assert service.store_target(tokens[:end], live) is not None
+    reconstructions = []
+    reconstruct = cache.prefix.reconstruct_cache
+
+    def record_reconstruction(table, **kwargs):
+        reconstructions.append(table.num_tokens)
+        return reconstruct(table, **kwargs)
+
+    monkeypatch.setattr(cache.prefix, "reconstruct_cache", record_reconstruction)
     flow, session, state, result, _ = prefill(setup, tokens)
+    assert reconstructions == [4096]
     assert flow.hit_tokens == 4096 - sink
     hidden = result.feature_store.current_hidden
     expected = mx.array(tokens, dtype=mx.float32)[None, :, None] * 2
     if sink:
-        assert mx.array_equal(hidden[:, :sink], expected[:, :sink]).item()
-    assert mx.array_equal(hidden[:, -4:], expected[:, -4:]).item()
+        assert mx.array_equal(hidden.slice(0, sink), expected[:, :sink]).item()
+    assert mx.array_equal(hidden.slice(len(tokens) - 4, len(tokens)), expected[:, -4:]).item()
     assert session.target_cache[1].caches[0].offset == len(tokens)
     assert state.prefill_logits[0, 0, 0].item() == sum(tokens)
 
@@ -250,7 +259,7 @@ def test_changed_drafter_reuses_target_and_replays_features(setup):
     assert flow.hit_tokens == 4094
     assert warm.prefill_logits.tolist() == cold.prefill_logits.tolist()
     expected = mx.array(tokens[-4:], dtype=mx.float32)[None, :, None] * 2
-    assert mx.array_equal(result.feature_store.current_hidden[:, -4:], expected).item()
+    assert mx.array_equal(result.feature_store.current_hidden.slice(len(tokens) - 4, len(tokens)), expected).item()
 
 
 @pytest.mark.parametrize("hot_only", [False, True])
@@ -654,3 +663,91 @@ def test_invalid_context_is_a_safe_cache_miss(setup, monkeypatch, broken):
     flow, _, warm, _, _ = prefill(setup, tokens)
     assert flow.hit_tokens == 0
     assert warm.prefill_logits.tolist() == cold.prefill_logits.tolist()
+
+
+@pytest.mark.parametrize("hot_only", [False, True])
+def test_long_prefix_stores_pool_deltas_and_one_draft_window(setup, tmp_path, monkeypatch, hot_only):
+    cache, draft, backend, provider, context = setup
+    cache.close()
+    cache = bridge.DFlashNativeCache(
+        model=provider.model,
+        target_ops=provider.target_ops,
+        model_name="proof",
+        cache_dir=tmp_path / "bounded",
+        config=SimpleNamespace(paged_cache_block_size=2048),
+        hot_cache_max_bytes=2**26,
+        hot_cache_only=hot_only,
+        max_size_bytes=2**26,
+    )
+    setup = (cache, draft, backend, provider, context)
+    saved_contexts = []
+    save = cache.ssd.save_prefix_context
+
+    def record_context(*args, **kwargs):
+        saved_contexts.append(kwargs["token_count"])
+        return save(*args, **kwargs)
+
+    monkeypatch.setattr(cache.ssd, "save_prefix_context", record_context)
+    tokens = [i % 7 + 1 for i in range(8 * cache.block_size + 5)]
+    try:
+        _, session, cold, result, _ = prefill(setup, tokens)
+        assert saved_contexts == [len(tokens)]
+        features = result.feature_store.current_hidden
+        assert isinstance(features, bridge.TargetHiddenChunks)
+        assert sum(c.shape[1] for c in features.chunks) == 6  # sink=2, window=4
+        assert features.total_len == len(tokens)
+        assert features.slice(len(tokens) - 4, len(tokens)).tolist() == [
+            [[2 * t] for t in tokens[-4:]]
+        ]
+        table, remaining = cache.prefix.fetch_cache("inspect", tokens)
+        assert not remaining
+        pooled_rows = 0
+        for block_id in table.block_ids:
+            block = cache.paged.allocated_blocks[block_id]
+            data, _ = cache.ssd.load_block_with_metadata(block.block_hash)
+            pooled = data[1][1][1]
+            assert pooled[0] == "__nstate__"
+            assert pooled[1] == "PoolingCacheDelta"
+            rows = pooled[2][2].shape[1]
+            assert rows <= cache.block_size // 4
+            pooled_rows += rows
+        assert pooled_rows == len(tokens) // 4
+        cache.prefix.release_cache("inspect")
+        warm, restored, state, _, _ = prefill(setup, tokens)
+        assert warm.hit_tokens == len(tokens)
+        assert state.prefill_logits.tolist() == cold.prefill_logits.tolist()
+        assert restored.target_cache[1].caches[1].pooled.shape[1] == pooled_rows
+        # A partial hit has no feature blob; the native target plus window replay
+        # must still produce exactly the cold state after an edited suffix.
+        edited = tokens[:6 * cache.block_size] + [3] * 9
+        flow, _, state, _, _ = prefill(setup, edited)
+        assert flow.hit_tokens >= 5 * cache.block_size - 2
+        assert state.prefill_logits.tolist() == [
+            [[sum(edited) + i for i in range(8)]]
+        ]
+    finally:
+        cache.close()
+
+
+
+def test_native_memory_waterfall_preserves_cache_byte_counts(setup, monkeypatch):
+    from dflash_mlx.engine.memory_waterfall import prefix_cache_memory_fields
+    cache, *_ = setup
+    monkeypatch.setattr(cache.ssd, "get_stats_dict", lambda: {
+        "hot_cache_size_bytes": 123, "total_size": 456,
+    })
+    fields = prefix_cache_memory_fields(cache.memory_waterfall_bytes())
+    assert fields["l1_snapshot_bytes"] == 123
+    assert fields["l2_disk_bytes"] == 456
+
+
+def test_required_snapshot_logits_fail_before_publication(setup):
+    cache, draft, *_rest, context = setup
+    service = bridge.NativeSnapshotService(cache, draft, "unused", context.runtime)
+    with pytest.raises(ValueError, match="requires last_logits"):
+        service.publish(
+            token_ids=[1], target_cache=[], target_hidden=mx.ones((1, 1, 1)),
+            last_logits=None, kind="prefill", snapshot_boundary=1,
+            allow_full_attention_context=False, require_logits=True,
+        )
+    assert service.insert_ms == 0

@@ -2252,3 +2252,50 @@ async def test_start_restores_wired_limit_when_native_close_fails(monkeypatch):
         await engine.start()
     restore.assert_awaited_once_with()
     assert engine._native_cache is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hot,ssd", [(True, False), (False, True), (True, True)])
+async def test_fallback_cache_clear_reaches_scheduler_manager(hot, ssd):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from omlx.engine.dflash import DFlashEngine
+
+    manager = Mock()
+    manager.clear_hot_cache.return_value = 3
+    manager.clear.return_value = 5
+    tracker = Mock()
+    scheduler = SimpleNamespace(paged_ssd_cache_manager=manager, _cache_rate_tracker=tracker)
+    fallback = SimpleNamespace(_engine=SimpleNamespace(engine=SimpleNamespace(scheduler=scheduler)))
+    engine = DFlashEngine("target", "draft")
+    engine._fallback_engine = fallback
+    engine._in_fallback_mode = True
+    report = await engine.clear_prompt_caches(hot=hot, ssd=ssd)
+    assert report == {"hot_cleared": 3 if hot else 0, "ssd_deleted": 5 if ssd else 0, "ranks": []}
+    assert manager.clear_hot_cache.call_count == int(hot)
+    assert manager.clear.call_count == int(ssd)
+    tracker.clear.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_admin_ssd_clear_reaches_dflash_fallback(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from omlx.admin import routes
+    from omlx.engine.dflash import DFlashEngine
+
+    manager = Mock()
+    manager.clear.return_value = 7
+    scheduler = SimpleNamespace(paged_ssd_cache_manager=manager)
+    engine = DFlashEngine("target", "draft")
+    engine._fallback_engine = SimpleNamespace(_engine=SimpleNamespace(engine=SimpleNamespace(scheduler=scheduler)))
+    engine._in_fallback_mode = True
+    pool = SimpleNamespace(
+        get_status=lambda: {"models": [{"id": "target", "loaded": True}]},
+        _entries={"target": SimpleNamespace(engine=engine)},
+    )
+    monkeypatch.setattr(routes, "_get_engine_pool", lambda: pool)
+    monkeypatch.setattr(routes, "_get_global_settings", lambda: None)
+    result = await routes.clear_ssd_cache(is_admin=True)
+    assert result["total_deleted"] == 7
+    manager.clear.assert_called_once()

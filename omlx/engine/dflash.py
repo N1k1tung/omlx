@@ -156,9 +156,8 @@ def is_dflash_compatible(model_path: str | Path) -> tuple[bool, str]:
 def _format_phase_timings(phase_timings_us: object) -> str:
     """Compact per-phase summary for the completion log, in milliseconds.
 
-    The dflash SummaryEvent reports where each cycle's time went
-    (prefill / draft / verify / replay / commit); without surfacing it the
-    server log gives no way to tell which phase dominates a slow request.
+    Without cycle profiling, draft/verify/replay measure host dispatch;
+    GPU execution is waited for later by acceptance and is absent here.
     """
     if not isinstance(phase_timings_us, dict) or not phase_timings_us:
         return ""
@@ -1011,10 +1010,22 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
     async def clear_prompt_caches(self, *, hot=False, ssd=False):
         from ..engine_core import get_mlx_executor
 
-        if self._native_cache is None:
-            return {"hot_cleared": 0, "ssd_deleted": 0, "ranks": []}
         def clear():
-            report = self._native_cache.clear(hot=hot, ssd=ssd)
+            if self._native_cache is not None:
+                report = self._native_cache.clear(hot=hot, ssd=ssd)
+            else:
+                # Batched fallbacks expose their cache through the scheduler.
+                scheduler = self.scheduler
+                manager = getattr(scheduler, "paged_ssd_cache_manager", None)
+                report = {"hot_cleared": 0, "ssd_deleted": 0, "ranks": []}
+                if manager is not None:
+                    if hot:
+                        report["hot_cleared"] = manager.clear_hot_cache()
+                    if ssd:
+                        report["ssd_deleted"] = manager.clear()
+                tracker = getattr(scheduler, "_cache_rate_tracker", None)
+                if tracker is not None:
+                    tracker.clear()
             self._cache_rate_tracker.clear()
             return report
         return await asyncio.get_running_loop().run_in_executor(get_mlx_executor(), clear)
@@ -1483,9 +1494,8 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
                         if self._native_cache is not None:
                             cache = self._native_cache
                             cache._tokens_saved += restored - prefix_flow.hit_tokens
-                            if not restored and prefix_flow.hit_tokens:
-                                cache._hits -= 1
-                                cache._misses += 1
+                            cache._hits += int(restored > 0) - int(prefix_flow.hit_tokens > 0)
+                            cache._misses += int(restored == 0) - int(prefix_flow.hit_tokens == 0)
                         prefix_flow.hit_tokens = restored
                     yield event
             finally:
@@ -1641,7 +1651,11 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
                         f"{gen_tokens} tokens, "
                         f"{gen_tps:.1f} tok/s, "
                         f"acceptance={accept_ratio:.1%}, "
-                        f"cycles={cycles}"
+                        f"cycles={cycles}, tokens/cycle={gen_tokens / max(1, cycles):.2f}, "
+                        f"temperature={temperature}, top_p={top_p}, top_k={top_k}, "
+                        f"block={getattr(event, 'block_tokens', self._block_size)}, "
+                        f"window={getattr(event, 'draft_window_size', self._draft_window_size)}, "
+                        f"cache_insert={getattr(prefix_flow, 'insert_ms', 0.0):.1f}ms"
                         f"{', fallback=AR' if fallback else ''}"
                         f"{phase_summary}"
                     )
