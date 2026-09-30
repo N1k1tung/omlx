@@ -31,11 +31,10 @@ This module provides:
   other oMLX DFlash adapters.
 
 The adapter fails closed: DDTree verification, verify-linear kernels and target
-KV quantization are refused rather than silently approximated. Prefix snapshots
-(the dflash L1/L2 cache) are supported through oMLX's snapshot-codec extension
-(``dflash_lifecycle._install_glm_dfa_serializer``), which teaches dflash-mlx's
-``serialize_target_cache`` GLM's composite DSA cache entries; restores rebuild
-them through :func:`hydrate_glm_dsa_cache`.
+KV quantization are refused rather than silently approximated. DFlashEngine
+publishes and restores prefixes through the native oMLX cache handlers. The
+stock dflash-mlx snapshot codec does not support GLM's composite cache.
+
 """
 
 from __future__ import annotations
@@ -147,65 +146,6 @@ def _is_glm_dsa_cache(cache_entry: Any) -> bool:
     if type(pool_cache).__name__ not in ("PoolingCache", "BatchPoolingCache"):
         return False
     return "caches" in dir(cache_entry) or hasattr(cache_entry, "caches")
-
-
-def hydrate_glm_dsa_cache(snapshot: Any, template_cache: Any, layer_idx: int) -> Any:
-    """Rebuild one GLM DSA cache from snapshot slots (see the lifecycle wrap)."""
-    from mlx_lm.models.cache import CacheList
-
-    fa_state = snapshot.fa_states[layer_idx]
-    gdn_state = snapshot.gdn_states[layer_idx]
-    if fa_state is None or gdn_state is None:
-        raise ValueError(f"Snapshot missing GLM DSA cache state at layer {layer_idx}")
-    components = _cache_components(template_cache)
-    kv_cache = components[0]
-    pool_cache = components[1] if len(components) > 1 else None
-    if pool_cache is None or not hasattr(pool_cache, "state"):
-        raise TypeError(
-            f"GLM DSA template cache at layer {layer_idx} is not a composite"
-        )
-    keys, values, offset = fa_state[:3]
-    if int(keys.shape[2]) != int(offset) or int(values.shape[2]) != int(offset):
-        raise ValueError(
-            f"Snapshot GLM DFA arrays at layer {layer_idx} are not exact-length "
-            f"(keys={int(keys.shape[2])}, values={int(values.shape[2])}, "
-            f"offset={int(offset)}); cannot adopt"
-        )
-    kv_cache.keys = keys
-    kv_cache.values = values
-    kv_cache.offset = int(offset)
-    pool_state = tuple(gdn_state)
-    base_arity = len(pool_cache.state)
-    if len(pool_state) < base_arity:
-        raise ValueError(
-            f"Snapshot GLM DFA pool state at layer {layer_idx} has "
-            f"{len(pool_state)} arrays; the pool expects {base_arity}"
-        )
-    pool_cache.state = pool_state[:base_arity]
-    # The template's PoolingCache was built by make_cache with the layer's own
-    # index_kpool ratio, so its meta_state is already correct — only the state
-    # arrays are adopted from the snapshot.
-    if len(pool_state) > base_arity:
-        # The undo tail mirrors PoolingCache._undo[5:] = (kv, gate, prev_kv,
-        # prev_gate); the head slots (buf_kv, buf_gate, remainder, pooled_prev)
-        # are rebuilt from the restored state itself so the undo matches the
-        # arrays the restored cache actually holds.
-        tail = pool_state[base_arity:]
-        head = list(pool_state[:base_arity])
-        undo = [None] * (5 + len(tail))
-        undo[0] = head[0]
-        undo[1] = head[1]
-        undo[2] = pool_cache.remainder
-        undo[3] = pool_cache.pooled
-        undo[4] = None
-        for slot, value in enumerate(tail, start=5):
-            undo[slot] = value
-        pool_cache._undo = tuple(undo)
-        pool_cache._undo_chain = False
-    else:
-        pool_cache._undo = None
-        pool_cache._undo_chain = False
-    return CacheList(kv_cache, pool_cache)
 
 
 def validate_glm5_dflash_pair(
@@ -357,10 +297,8 @@ class Glm5NextTargetOps:
             supports_dflash=True,
             supports_recurrent_rollback=True,
             supports_kv_trim=True,
-            # The snapshot codec gains GLM DSA composite entries through oMLX's
-            # serializer wrap (installed with the backend); KDA layers ride the
-            # runtime's own recurrent-cache slot.
-            supports_prefix_snapshot=True,
+            # Native integration supplies this capability at the engine boundary.
+            supports_prefix_snapshot=False,
             supports_rotating_cache_snapshot=False,
             supports_shared_kv=False,
             supports_target_hidden_capture=True,
@@ -867,7 +805,6 @@ def install_dflash_glm5_backend() -> bool:
 __all__ = [
     "GLM5_MODEL_TYPES",
     "Glm5NextTargetOps",
-    "hydrate_glm_dsa_cache",
     "install_dflash_glm5_backend",
     "is_glm5_dflash_target",
     "is_glm5_model_type",
