@@ -156,7 +156,7 @@ def test_capabilities_fail_closed_for_unproven_paths():
     assert caps.supports_recurrent_rollback is True
     assert caps.supports_kv_trim is True
     # Prefix snapshots are supported through oMLX's snapshot-codec extension.
-    assert caps.supports_prefix_snapshot is True
+    assert not caps.supports_prefix_snapshot is True
     assert caps.supports_rotating_cache_snapshot is False
     assert caps.supports_verify_linear is False
     assert caps.supports_tree_verify is False
@@ -988,23 +988,6 @@ def test_glm_target_loader_rejects_kv_quantization_and_foreign_configs(tmp_path)
         load_glm5_target_bundle(tmp_path)
 
 
-def test_glm_adapter_prefill_chunk_follows_scheduler_floor(monkeypatch):
-    """DFlash GLM-5.3 prefill uses the batched scheduler's floor when wider."""
-    import types
-
-    import omlx.engine.dflash as dflash_engine
-    from omlx.engine.dflash import _adapter_prefill_chunk
-
-    glm = types.SimpleNamespace(backend_name="glm5_next")
-    other = types.SimpleNamespace(backend_name="qwen3")
-    monkeypatch.setattr(dflash_engine, "_glm5_next_prefill_floor", lambda: 4096)
-    assert _adapter_prefill_chunk(glm, 2048) == 4096
-    assert _adapter_prefill_chunk(glm, 8192) == 8192
-    assert _adapter_prefill_chunk(other, 2048) == 2048
-    monkeypatch.setattr(dflash_engine, "_glm5_next_prefill_floor", lambda: 0)
-    assert _adapter_prefill_chunk(glm, 2048) == 2048
-
-
 @pytest.mark.parametrize(
     "native,memory_gb,nax,nax_mla,expected",
     [
@@ -1037,20 +1020,6 @@ def test_glm5_next_prefill_floor(
 # ---------------------------------------------------------------------------
 
 
-def _snapshot_key():
-    from dflash_mlx.cache.fingerprints import DFlashPrefixKey
-
-    return DFlashPrefixKey(
-        target_model_id="target",
-        draft_model_id="draft",
-        capture_layer_ids=(5, 14, 24, 33, 42),
-        draft_sink_size=64,
-        draft_window_size=1024,
-        template_hash="0" * 64,
-        prompt_policy_hash="1" * 64,
-    )
-
-
 def _append_composite(cache, tokens, offset):
     """Drive a CacheList(KVCache, PoolingCache) through a tokens-wide update."""
     kv = mx.arange(
@@ -1073,211 +1042,6 @@ def _snapshot_cache_list():
     from mlx_lm.models.cache import PoolingCache
 
     return CacheList(KVCache(), PoolingCache(4))
-
-
-def _dfa_snapshot(token_count):
-    """Serialize a live composite into a DFlashPrefixSnapshot (dflash codec)."""
-    from dflash_mlx.cache.snapshot import DFlashPrefixSnapshot
-
-    from omlx.patches.dflash_lifecycle import install_dflash_lifecycle_wrap
-
-    install_dflash_lifecycle_wrap()
-    cache = _snapshot_cache_list()
-    _append_composite(cache, token_count, 0)
-    fa, gdn = _serialize_target_cache([cache])
-    return DFlashPrefixSnapshot(
-        token_ids=tuple(range(token_count)),
-        fa_states=fa,
-        gdn_states=gdn,
-        target_hidden_chunks=(mx.zeros((1, token_count, 8)),),
-        target_hidden_chunk_spans=((0, token_count),),
-        target_hidden_total_len=token_count,
-        last_logits=mx.zeros((1, 1, 12)),
-        key=_snapshot_key(),
-        kind="prefill",
-    )
-
-
-def _serialize_target_cache(target_cache):
-    import dflash_mlx.cache.codecs as codecs
-
-    return codecs.serialize_target_cache(target_cache)
-
-
-def test_glm_dsa_cache_serializes_into_snapshot_slots():
-    """Composite DSA entries land in the FA (KV) and GDN (pool) snapshot slots."""
-    snapshot = _dfa_snapshot(7)
-    fa_state = snapshot.fa_states[0]
-    gdn_state = snapshot.gdn_states[0]
-    assert fa_state is not None
-    keys, values, offset = fa_state
-    assert offset == 7
-    assert int(keys.shape[2]) == 7 and int(values.shape[2]) == 7
-    assert gdn_state is not None
-    # Pool state: (buf_kv, buf_gate, pooled, prev_kv, prev_gate) — pooled rows
-    # carry the two complete 4-token windows of a 7-token prefix.
-    _buf_kv, _buf_gate, pooled, _prev_kv, _prev_gate = gdn_state[:5]
-    assert pooled is not None and int(pooled.shape[1]) == 1
-    mx.eval(keys, values, pooled)
-
-
-def test_glm_dsa_snapshot_hydrates_bitwise():
-    """hydrate_target_cache rebuilds a bitwise-equal composite from a snapshot."""
-    from mlx_lm.models.cache import CacheList
-    from dflash_mlx.cache.snapshot import DFlashPrefixSnapshot
-
-    import dflash_mlx.cache.codecs as codecs
-
-    from omlx.patches.dflash_lifecycle import install_dflash_lifecycle_wrap
-
-    install_dflash_lifecycle_wrap()
-
-    live = _snapshot_cache_list()
-    _append_composite(live, 3, 0)
-    _append_composite(live, 4, 3)
-    fa, gdn = _serialize_target_cache([live])
-    snapshot = DFlashPrefixSnapshot(
-        token_ids=tuple(range(7)),
-        fa_states=fa,
-        gdn_states=gdn,
-        target_hidden_chunks=(mx.zeros((1, 7, 8)),),
-        target_hidden_chunk_spans=((0, 7),),
-        target_hidden_total_len=7,
-        last_logits=mx.zeros((1, 1, 12)),
-        key=_snapshot_key(),
-        kind="prefill",
-    )
-
-    hydrated = codecs.hydrate_target_cache(snapshot, [_snapshot_cache_list()])
-    assert isinstance(hydrated[0], CacheList)
-    live_kv, live_values = live[0].keys_and_values()
-    hydrated_kv, hydrated_values = hydrated[0][0].keys_and_values()
-    assert hydrated[0][0].offset == 7
-    assert mx.array_equal(hydrated_kv, live_kv).item()
-    assert mx.array_equal(hydrated_values, live_values).item()
-    assert mx.array_equal(hydrated[0][1].pooled, live[1].pooled).item()
-    assert hydrated[0][1].remainder == live[1].remainder
-    assert hydrated[0][1].meta_state == live[1].meta_state
-
-
-def test_glm_dsa_snapshot_restore_rolls_back_like_a_serial_forward():
-    """Snapshot restore + adapter rollback equals the serial accepted prefix."""
-    from dflash_mlx.cache.snapshot import DFlashPrefixSnapshot
-
-    from omlx.patches.dflash_glm5 import Glm5NextTargetOps
-    from omlx.patches.mlx_lm_mtp import cache_rollback
-
-    # Serial reference: 3-token prefill + 1 accepted token.
-    reference = _snapshot_cache_list()
-    _append_composite(reference, 3, 0)
-    _append_composite(reference, 1, 3)
-
-    # Live: 3-token prefill + a 4-token verify block (1 acceptance of 4 drafts).
-    live = _snapshot_cache_list()
-    _append_composite(live, 3, 0)
-    cache_rollback.set_undo_armed(True)
-    try:
-        _append_composite(live, 4, 3)
-    finally:
-        cache_rollback.set_undo_armed(False)
-
-    fa, gdn = _serialize_target_cache([live])
-    snapshot = DFlashPrefixSnapshot(
-        token_ids=tuple(range(7)),
-        fa_states=fa,
-        gdn_states=gdn,
-        target_hidden_chunks=(mx.zeros((1, 7, 8)),),
-        target_hidden_chunk_spans=((0, 7),),
-        target_hidden_total_len=7,
-        last_logits=mx.zeros((1, 1, 12)),
-        key=_snapshot_key(),
-        kind="prefill",
-    )
-    hydrated = _hydrate(snapshot)
-    Glm5NextTargetOps().restore_after_acceptance(
-        hydrated, target_len=4, acceptance_length=1, drafted_tokens=4
-    )
-
-    live_kv, live_values = hydrated[0][0].keys_and_values()
-    ref_kv, ref_values = reference[0].keys_and_values()
-    assert mx.array_equal(live_kv, ref_kv).item()
-    assert mx.array_equal(live_values, ref_values).item()
-    assert mx.array_equal(hydrated[0][1].pooled, reference[1].pooled).item()
-    assert hydrated[0][1].remainder == reference[1].remainder
-
-
-def _hydrate(snapshot):
-    import dflash_mlx.cache.codecs as codecs
-
-    return codecs.hydrate_target_cache(snapshot, [_snapshot_cache_list()])
-
-
-def test_glm_dfa_serializer_rejects_buffered_kv_rows(tmp_path):
-    """A padded KV buffer must never enter a snapshot with a stale offset."""
-    from omlx.patches.deepseek_v4 import apply_pooling_cache_support
-    from omlx.patches.dflash_lifecycle import install_dflash_lifecycle_wrap
-    from omlx.patches.mlx_vlm_glm5_next_compat import (
-        apply_mlx_vlm_glm5_next_compat_patch,
-    )
-
-    apply_mlx_vlm_glm5_next_compat_patch()
-    apply_pooling_cache_support()
-    install_dflash_lifecycle_wrap()
-    from mlx_lm.models.cache import PoolingCache
-    from mlx_vlm.models.cache import KVCache as VLMKV
-
-    class BrokenStateKV(VLMKV):
-        # Simulate a foreign KV cache whose state property skips the exact-length
-        # slicing both real flavors perform.
-        @property
-        def state(self):
-            return self.keys, self.values
-
-    kv = BrokenStateKV()
-    kv.keys = mx.zeros((1, 1, 16, 4))
-    kv.values = mx.zeros((1, 1, 16, 1))
-    kv.offset = 5
-    kv.step = 256
-    composite = SimpleNamespace(caches=(kv, PoolingCache(4)))
-    with pytest.raises(ValueError, match="exact-length"):
-        _serialize_target_cache([composite])
-
-
-def test_glm_dsa_snapshot_survives_l2_safetensors_roundtrip(tmp_path):
-    """The L2 writer/reader round-trip preserves the composite snapshot state."""
-    import json
-
-    from dflash_mlx.cache import prefix_l2 as l2mod
-
-    snapshot = _dfa_snapshot(9)
-    arrays, meta = l2mod._serialize(snapshot)
-    mx.eval(*arrays.values())
-    path = tmp_path / "snap.safetensors"
-    mx.save_safetensors(str(path), arrays, metadata=meta)
-    loaded_arrays, loaded_meta = mx.load(
-        str(path), format="safetensors", return_metadata=True
-    )
-    restored = l2mod._deserialize(loaded_arrays, json.loads(loaded_meta["dflash_meta"]))
-    hydrated = _hydrate(restored)
-    reference = _snapshot_cache_list()
-    _append_composite(reference, 9, 0)
-    live_kv, live_values = hydrated[0][0].keys_and_values()
-    ref_kv, ref_values = reference[0].keys_and_values()
-    assert mx.array_equal(live_kv, ref_kv).item()
-    assert mx.array_equal(live_values, ref_values).item()
-    assert mx.array_equal(hydrated[0][1].pooled, reference[1].pooled).item()
-
-
-def test_install_dflash_glm5_backend_installs_dfa_serializer():
-    """Backend registration arms the composite serializer patch exactly once."""
-    import dflash_mlx.cache.codecs as codecs
-
-    from omlx.patches.dflash_glm5 import install_dflash_glm5_backend
-
-    install_dflash_glm5_backend()
-    assert getattr(codecs.serialize_target_cache, "_omlx_glm_dfa", False)
-    assert getattr(codecs.hydrate_target_cache, "_omlx_glm_dfa", False)
-    assert install_dflash_glm5_backend() is False
 
 
 def test_glm_dsa_cleanup_clears_residual_undo():
