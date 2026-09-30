@@ -1061,3 +1061,70 @@ def test_glm_dsa_cleanup_clears_residual_undo():
     Glm5NextTargetOps().cleanup_generation_caches([composite], [])
     assert composite[1]._undo is None
     assert composite[1]._undo_chain is False
+
+
+@pytest.mark.parametrize("accepted", [0, 1, 3])
+def test_fused_recurrent_rollback_reuses_projected_verify_inputs(monkeypatch, accepted):
+    from mlx_lm.models.cache import ArraysCache
+    from omlx.patches.mlx_vlm_glm5_next_compat import apply_mlx_vlm_glm5_next_compat_patch
+    from omlx.patches.dflash_glm5 import (
+        Glm5NextTargetOps, _Glm5RecurrentRollbackCache,
+        _install_glm5_recurrent_hook, restore_glm5_dflash_class_patches,
+    )
+    apply_mlx_vlm_glm5_next_compat_patch()
+    from mlx_vlm.models.glm5_next import language
+
+    monkeypatch.setattr(language, "_DECODE_FUSION", True)
+    config = SimpleNamespace(
+        hidden_size=128, linear_num_heads=2, linear_head_dim=128,
+        linear_conv_kernel_dim=4, rms_norm_eps=1e-6, linear_lower_bound=-5.0,
+    )
+    mx.random.seed(7)
+    attention = language.Glm5NextLinearAttention(config)
+    nn.quantize(attention, group_size=64, bits=4)
+    attention.load_weights([
+        (name, value.astype(mx.bfloat16))
+        for name, value in nn.utils.tree_flatten(attention.parameters())
+        if value.dtype != mx.uint32 and language.glm5_next_cast_predicate(name)
+    ], strict=False)
+    prefix = mx.random.normal((1, 3, 128)).astype(mx.bfloat16)
+    verify = mx.random.normal((1, 4, 128)).astype(mx.bfloat16)
+    reference = ArraysCache(2)
+    attention(prefix, cache=reference)
+    expected = attention(verify[:, :accepted + 1], cache=reference)
+    mx.eval(expected, *reference.cache)
+    full_reference = ArraysCache(2)
+    attention(prefix, cache=full_reference)
+    expected_verify = attention(verify, cache=full_reference)
+    mx.eval(expected_verify)
+
+    cache = _Glm5RecurrentRollbackCache(2, conv_kernel_size=4)
+    attention(prefix, cache=cache)
+    cache.arm_rollback(prefix_len=3)
+    _install_glm5_recurrent_hook(attention)
+    calls = []
+    decode_step = attention._decode_step
+
+    def record_decode(*args, **kwargs):
+        calls.append(args[0].shape[1])
+        return decode_step(*args, **kwargs)
+
+    monkeypatch.setattr(attention, "_decode_step", record_decode)
+    try:
+        output = attention(verify, cache=cache)
+        mx.eval(output, *cache.cache)
+        assert isinstance(cache._omlx_glm5_verify, language.KdaStepCapture)
+        assert calls == [4]
+        assert mx.array_equal(output, expected_verify).item()
+        Glm5NextTargetOps().restore_after_acceptance(
+            [cache], target_len=4 + accepted,
+            acceptance_length=accepted, drafted_tokens=3,
+        )
+        mx.eval(*cache.cache)
+        assert calls == [4]  # rollback did not run another input projection
+        for actual, expected_state in zip(cache.cache, reference.cache, strict=True):
+            assert mx.array_equal(actual, expected_state).item()
+        assert not cache._armed
+        assert not hasattr(cache, "_omlx_glm5_verify")
+    finally:
+        restore_glm5_dflash_class_patches()

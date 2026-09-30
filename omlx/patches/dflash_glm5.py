@@ -240,6 +240,13 @@ def _install_glm5_recurrent_hook(linear_attn: Any) -> None:
             cache, "_armed", False
         ):
             return original_call(self, inputs, mask=mask, cache=cache)
+        decode_step = getattr(self, "_decode_step", None)
+        if decode_step is not None:
+            captures = []
+            output = decode_step(inputs, mask, cache, capture=captures)
+            if output is not None:
+                setattr(cache, _VERIFY_STATE_ATTR, captures[0])
+                return output
         output = original_call(self, inputs, mask=mask, cache=cache)
         setattr(cache, _VERIFY_STATE_ATTR, (self, inputs, mask))
         return output
@@ -616,6 +623,15 @@ class Glm5NextTargetOps:
         if snapshot is None or verify is None:
             cls._clear_glm_recurrent_transients(cache_entry)
             raise RuntimeError("GLM-5.3 recurrent rollback state is missing")
+
+        from mlx_vlm.models.glm5_next.language import KdaStepCapture
+
+        if isinstance(verify, KdaStepCapture):
+            # Replay the kernel inputs already projected during verification,
+            # as MTP does, rather than running the full layer a second time.
+            cache_entry.cache = list(verify.replay(int(accepted_steps)))
+            cls._clear_glm_recurrent_transients(cache_entry)
+            return
 
         attention, inputs, mask = verify
         accepted_steps = max(0, min(int(accepted_steps), int(inputs.shape[1])))
