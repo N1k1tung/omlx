@@ -49,6 +49,7 @@ from ..cache.vision_feature_cache import VisionFeatureSSDCache
 from ..exceptions import InvalidRequestError
 from ..model_settings import ane_prefill_backend, ane_prefill_fraction
 from ..models.vlm import VLMModelAdapter
+from ..patches.gemma4_audio import apply_gemma4_audio_patch
 from ..patches.mlx_vlm_pixtral_torch_free import apply_pixtral_torch_free_patch
 from ..reasoning_effort import apply_chat_template_with_reasoning_effort_fallback
 from ..utils.image import (
@@ -110,6 +111,9 @@ COHERE2_MOE_MODEL_TYPE = "cohere2_moe"
 QWEN4_EXP_MODEL_TYPE = "qwen4_exp"
 MINIMAX_M3_VL_MODEL_TYPE = "minimax_m3_vl"
 MINIMAX_M3_MODEL_TYPES = {"minimax_m3", MINIMAX_M3_VL_MODEL_TYPE}
+# mlx-vlm's Gemma4Processor.apply_chat_template renders the messages again. It
+# moves audio markers to the last user turn and prints list system content.
+TOKENIZER_CHAT_TEMPLATE_MODEL_TYPES = {"gemma4", "gemma4_unified", "diffusion_gemma"}
 
 DIFFUSION_PREFILL_STEP_SIZE = 2048
 
@@ -594,6 +598,20 @@ def _resolve_optiq_vision_sidecar(model_dir: Path) -> Path | None:
     return sidecar
 
 
+_AUDIO_WEIGHT_PREFIXES = ("audio_tower.", "embed_audio.", "audio_encoder.")
+
+
+def _is_audio_weight_key(key: str) -> bool:
+    """True for audio encoder weights under MLX or HF naming.
+
+    HF-named checkpoints keep a leading `model.` (`model.audio_tower.*`) that
+    mlx-vlm's sanitize strips only at load time.
+    """
+    if key.startswith("model."):
+        key = key[len("model.") :]
+    return key.startswith(_AUDIO_WEIGHT_PREFIXES)
+
+
 def _has_audio_weights(model_dir: Path) -> bool:
     """Return True iff checkpoint shards or MiMo's sidecar contain audio weights."""
     import safetensors
@@ -610,9 +628,8 @@ def _has_audio_weights(model_dir: Path) -> bool:
         try:
             with safetensors.safe_open(str(sf), framework="np") as f:
                 # safetensors.safe_open exposes keys() but is not a Mapping.
-                for k in f.keys():  # noqa: SIM118
-                    if k.startswith(("audio_tower.", "embed_audio.", "audio_encoder.")):
-                        return True
+                if any(_is_audio_weight_key(k) for k in f.keys()):  # noqa: SIM118
+                    return True
         except Exception:
             # Corrupt or unreadable shard — treat as no audio info, let
             # downstream loader produce its own error.
@@ -1711,6 +1728,85 @@ def _count_image_tokens_real(
     return total
 
 
+def _audio_feature_cache_key_ranges(
+    token_ids: list[int],
+    input_features: Any,
+    input_features_mask: Any,
+    audio_token_id: int | None,
+    image_ranges: list[tuple[int, str]],
+) -> list[tuple[int, str]]:
+    """Extend image cache boundaries with cumulative audio-clip identities.
+
+    Audio placeholder tokens only encode clip length, so without this two
+    different clips of equal length share prefix-cache blocks. Each clip is
+    hashed without its batch padding (clips are padded to the longest one in
+    the request), so a clip keeps its key when a later turn adds a longer one.
+    """
+    import hashlib
+
+    import numpy as np
+
+    def _to_np(value):
+        if isinstance(value, mx.array):
+            if value.dtype == mx.bfloat16:
+                value = value.astype(mx.float32)
+            return np.array(value)
+        return np.asarray(value)
+
+    features = _to_np(input_features)
+    mask = None if input_features_mask is None else _to_np(input_features_mask)
+
+    runs = []
+    position = 0
+    while audio_token_id is not None and position < len(token_ids):
+        if token_ids[position] != audio_token_id:
+            position += 1
+            continue
+        runs.append(position)
+        while position < len(token_ids) and token_ids[position] == audio_token_id:
+            position += 1
+
+    audio_hash = hashlib.sha256()
+    audio_events = []
+    if features.ndim >= 2 and len(runs) == features.shape[0]:
+        for i, start in enumerate(runs):
+            clip = features[i]
+            if mask is not None and mask.shape[:2] == features.shape[:2]:
+                valid = int(mask[i].sum())
+                # Trim only right padding; any other mask layout keeps the
+                # padded row, which can over-key but never collide.
+                if mask[i][:valid].all():
+                    clip = clip[:valid]
+            audio_hash.update(str(clip.shape).encode())
+            audio_hash.update(np.ascontiguousarray(clip).tobytes())
+            audio_events.append((start, audio_hash.hexdigest()))
+    else:
+        # Clips can't be matched to token runs: key everything from the
+        # first audio token on (or the whole request) on all audio input.
+        audio_hash.update(str(features.shape).encode())
+        audio_hash.update(np.ascontiguousarray(features).tobytes())
+        audio_events.append((runs[0] if runs else 0, audio_hash.hexdigest()))
+
+    events = [(start, key, None) for start, key in image_ranges]
+    events += [(start, None, key) for start, key in audio_events]
+    ranges = []
+    image_key = ""
+    audio_key = None
+    for start, image_update, audio_update in sorted(events, key=lambda e: e[0]):
+        if image_update is not None:
+            image_key = image_update
+        if audio_update is not None:
+            audio_key = audio_update
+        key = image_key
+        if audio_key is not None:
+            key = hashlib.sha256(f"audio:{image_key}:{audio_key}".encode()).hexdigest()
+        if ranges and ranges[-1][0] == start:
+            ranges[-1] = (start, key)
+        else:
+            ranges.append((start, key))
+    return ranges
+
+
 class VLMBatchedEngine(BaseEngine):
     """
     VLM engine with continuous batching, tiered KV cache, and boundary snapshots.
@@ -1972,6 +2068,7 @@ class VLMBatchedEngine(BaseEngine):
             _patch_video_processor_bug()
             _patch_torch_free_image_processor()
             apply_pixtral_torch_free_patch()
+            apply_gemma4_audio_patch()
             with (
                 _strip_audio_config_if_orphaned(Path(self._model_name)),
                 _strip_vision_config_if_orphaned(Path(self._model_name)),
@@ -2919,6 +3016,14 @@ class VLMBatchedEngine(BaseEngine):
         tokenizer.tool_parser = tool_module.parse_tool_call
 
         logger.info(f"VLM tool calling enabled: parser={tool_parser_type}")
+
+    def _chat_template_target(self, model_type: str) -> Any:
+        """Return the object that renders messages already formatted by oMLX."""
+        if model_type in TOKENIZER_CHAT_TEMPLATE_MODEL_TYPES or not hasattr(
+            self._processor, "apply_chat_template"
+        ):
+            return getattr(self._processor, "tokenizer", self._processor)
+        return self._processor
 
     @staticmethod
     def _count_content_parts(content: Any, part_types: set[str]) -> int:
@@ -3873,10 +3978,7 @@ class VLMBatchedEngine(BaseEngine):
             template_kwargs.update(chat_template_kwargs)
         _apply_minimax_m3_thinking_mode(model_type, template_kwargs)
 
-        # Use processor or its tokenizer for chat template application
-        template_target = self._processor
-        if not hasattr(template_target, "apply_chat_template"):
-            template_target = getattr(self._processor, "tokenizer", self._processor)
+        template_target = self._chat_template_target(model_type)
         try:
             prompt = apply_chat_template_with_reasoning_effort_fallback(
                 template_target,
@@ -4262,6 +4364,23 @@ class VLMBatchedEngine(BaseEngine):
                     token_ids,
                     extra_model_inputs["audio_codes"],
                     self._vlm_model.config.audio_token_id,
+                    image_ranges,
+                )
+                image_cache_key_start = image_cache_key_ranges[0][0]
+                image_hash = image_cache_key_ranges[-1][1]
+            elif has_audio and "input_features" in extra_model_inputs:
+                image_ranges = image_cache_key_ranges
+                if image_hash is not None and not image_ranges:
+                    image_ranges = [(0, image_hash)]
+                config = self._vlm_model.config
+                audio_token_id = getattr(config, "audio_token_id", None)
+                if audio_token_id is None:
+                    audio_token_id = getattr(config, "audio_token_index", None)
+                image_cache_key_ranges = _audio_feature_cache_key_ranges(
+                    token_ids,
+                    extra_model_inputs["input_features"],
+                    extra_model_inputs.get("input_features_mask"),
+                    audio_token_id,
                     image_ranges,
                 )
                 image_cache_key_start = image_cache_key_ranges[0][0]
@@ -5231,9 +5350,7 @@ class VLMBatchedEngine(BaseEngine):
             template_kwargs.update(chat_template_kwargs)
         _apply_minimax_m3_thinking_mode(model_type, template_kwargs)
 
-        template_target = self._processor
-        if not hasattr(template_target, "apply_chat_template"):
-            template_target = getattr(self._processor, "tokenizer", self._processor)
+        template_target = self._chat_template_target(model_type)
         try:
             return template_target.apply_chat_template(
                 formatted_messages, **template_kwargs
