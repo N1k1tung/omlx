@@ -1513,31 +1513,38 @@ class Glm5NextSparseAttention(nn.Module):
         return qr, qr_outs[0], outs[1], indexer_projected
 
     def _gathered_attention(self, q, kv_latent, topk_indices):
-        """Latent-space gather for short query blocks; returns pre-o_proj flat."""
+        """Short-block sparse attention, with a gather fallback; pre-o_proj flat."""
         B, H, L, _ = q.shape
-        Kv = kv_latent.shape[2]
         dim = kv_latent.shape[-1]
-        selected = topk_indices[:, 0]
-        topk = selected.shape[-1]
         q_embedded = self.embed_q(q)
-        clamped = mx.clip(selected, 0, Kv - 1)
-        gathered = mx.take_along_axis(
-            mx.broadcast_to(kv_latent[:, 0, None], (B, L, Kv, dim)),
-            mx.broadcast_to(clamped[..., None], (B, L, topk, dim)),
-            axis=2,
+        # The indexer already excludes future keys. NAX reads selected latent
+        # rows directly, avoiding a [B, L, TOPK, dim] gather for verification.
+        # Keep FP32 inputs on the fallback instead of downcasting them.
+        output = sparse_mla_attention_nax(
+            q_embedded, kv_latent, topk_indices, self.scale
         )
-        q_latent = q_embedded.transpose(0, 2, 1, 3).reshape(B * L, H, 1, dim)
-        gathered = gathered.reshape(B * L, 1, topk, dim)
-        valid = (selected >= 0).reshape(B * L, 1, 1, topk)
-        output = scaled_dot_product_attention(
-            q_latent,
-            gathered,
-            gathered,
-            cache=None,
-            scale=self.scale,
-            mask=valid,
-        )
-        output = output.reshape(B, L, H, dim).transpose(0, 2, 1, 3)
+        if output is None:
+            Kv = kv_latent.shape[2]
+            selected = topk_indices[:, 0]
+            topk = selected.shape[-1]
+            clamped = mx.clip(selected, 0, Kv - 1)
+            gathered = mx.take_along_axis(
+                mx.broadcast_to(kv_latent[:, 0, None], (B, L, Kv, dim)),
+                mx.broadcast_to(clamped[..., None], (B, L, topk, dim)),
+                axis=2,
+            )
+            q_latent = q_embedded.transpose(0, 2, 1, 3).reshape(B * L, H, 1, dim)
+            gathered = gathered.reshape(B * L, 1, topk, dim)
+            valid = (selected >= 0).reshape(B * L, 1, 1, topk)
+            output = scaled_dot_product_attention(
+                q_latent,
+                gathered,
+                gathered,
+                cache=None,
+                scale=self.scale,
+                mask=valid,
+            )
+            output = output.reshape(B, L, H, dim).transpose(0, 2, 1, 3)
         output = self.unembed_out(output).transpose(0, 2, 1, 3).reshape(B, L, -1)
         return output
 
