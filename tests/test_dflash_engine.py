@@ -404,6 +404,7 @@ class TestDFlashEngineInit:
             from omlx.engine import dflash as dflash_mod
             from omlx.engine.dflash import DFlashEngine
             from omlx.patches import dflash_lifecycle, qwen35_moe_gate_up
+            from omlx.speculative import dflash_drafter
         except ImportError:
             pytest.skip("dflash-mlx not installed")
 
@@ -428,12 +429,19 @@ class TestDFlashEngineInit:
             captured["draft_kwargs"] = kwargs
 
             class FakeDraft:
+                is_dflash2 = True
+
                 def bind_target_model(self, target_model, *, target_ops):
                     captured["bound_target"] = target_model
                     captured["bound_target_ops"] = target_ops
 
             return FakeDraft(), {"config": {"sliding_window": 2048}}
 
+        monkeypatch.setattr(
+            dflash_drafter,
+            "apply_dflash_conv_patch",
+            lambda: captured.setdefault("conv_fusion", True),
+        )
         monkeypatch.setattr(
             dflash_loading, "load_target_bundle", fake_load_target_bundle
         )
@@ -479,6 +487,7 @@ class TestDFlashEngineInit:
             assert captured["fused_target"] is engine._target_model
             assert captured["bound_target"] is engine._target_model
             assert captured["bound_target_ops"] is engine._target_ops
+            assert captured["conv_fusion"]
             assert engine._draft_window_size == 2048
             assert engine._runtime_context.runtime.draft_window_size == 2048
         finally:

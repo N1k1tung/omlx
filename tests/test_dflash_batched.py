@@ -419,6 +419,51 @@ def test_conv_kernel_matches_grouped_dynamic_convolve():
     ).item()
 
 
+@pytest.mark.parametrize("dtype", [mx.bfloat16, mx.float16, mx.float32])
+@pytest.mark.parametrize("quantized", [False, True])
+@pytest.mark.parametrize("length", [0, 1, 4, 8])
+def test_runtime_conv_fusion_is_bitwise_reference(monkeypatch, dtype, quantized, length):
+    from dflash_mlx import model
+
+    reference = getattr(
+        model._grouped_dynamic_convolve, "__wrapped__", model._grouped_dynamic_convolve
+    )
+    monkeypatch.setattr(model, "_grouped_dynamic_convolve", reference)
+    mx.random.seed(length)
+    conv = model.GroupedDynamicCausalConv(256, 2, 16)
+    # The runtime casts the base before adding dynamic kernels, even when
+    # the checkpoint's base and activation dtypes differ.
+    conv.base_kernel = mx.random.normal((2, 2, 256)) * 0.5
+    conv.kernel_projection.weight = (
+        mx.random.normal((64, 256)) * 0.05
+    ).astype(dtype)
+    if quantized:
+        nn.quantize(conv, bits=4, group_size=64)
+    x = mx.random.normal((3, length, 512)).astype(dtype)[..., ::2]
+    expected, expected_dynamic = conv.prepare(x)
+    y = mx.random.normal((3, length, 256)).astype(dtype)
+    expected_finish = conv.finish(y, expected_dynamic)
+    mx.eval(expected, expected_dynamic, expected_finish)
+
+    fused = dd._convolve
+    calls = []
+
+    def recorded(*args):
+        calls.append(True)
+        return fused(*args)
+
+    monkeypatch.setattr(dd, "_convolve", recorded)
+    assert dd.apply_dflash_conv_patch()
+    assert not dd.apply_dflash_conv_patch()
+    got, dynamic = conv.prepare(x)
+    finish = conv.finish(y, dynamic)
+    bits = mx.uint32 if dtype == mx.float32 else mx.uint16
+    assert mx.array_equal(got.view(bits), expected.view(bits)).item()
+    assert mx.array_equal(dynamic.view(bits), expected_dynamic.view(bits)).item()
+    assert mx.array_equal(finish.view(bits), expected_finish.view(bits)).item()
+    assert len(calls) == (2 if dtype != mx.float32 and length else 0)
+
+
 def test_resolve_block_size_clamps_to_trained_block_and_mtp_limit():
     model = SimpleNamespace(config=SimpleNamespace(block_size=8))
     assert dd.resolve_block_size(model, None) == 8

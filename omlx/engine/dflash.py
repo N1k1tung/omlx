@@ -792,6 +792,10 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
                     else None
                 ),
             )
+            if getattr(draft, "is_dflash2", False):
+                from ..speculative.dflash_drafter import apply_dflash_conv_patch
+
+                apply_dflash_conv_patch()
             from ..patches.dflash_mimo_v2 import (
                 draft_backend_for,
                 prepare_mimo_draft,

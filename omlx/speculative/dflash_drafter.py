@@ -21,6 +21,8 @@ import time
 from collections.abc import Iterable, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from functools import wraps
+from types import SimpleNamespace
 from typing import Any
 
 import mlx.core as mx
@@ -77,9 +79,8 @@ class _Predraft:
     proposals: list[tuple]
 
 
-# ``_grouped_dynamic_convolve`` for one of the two kernel sets in
-# ``dynamic`` (B, L, 2, KS, G), one thread per output element, with the bf16
-# rounding of each op in the composed version.
+# ``_grouped_dynamic_convolve`` for a single kernel set or one of the two
+# packed sets, with the rounding of each op in the composed version.
 _CONV_SOURCE = """
     uint e = thread_position_in_grid.x;
     uint c = e % H;
@@ -89,8 +90,9 @@ _CONV_SOURCE = """
     T acc = T(0);
     for (int o = 0; o < KS; ++o) {
         T xv = int(t) >= o ? x[e - uint(o) * H] : T(0);
+        T b = static_cast<T>(base[(SET * KS + o) * H + c]);
         T k = static_cast<T>(
-            float(base[(SET * KS + o) * H + c]) + float(dyn[((bl * 2 + SET) * KS + o) * G + g]));
+            float(b) + float(dyn[((bl * SETS + SET) * KS + o) * G + g]));
         T prod = static_cast<T>(float(k) * float(xv));
         acc = static_cast<T>(float(acc) + float(prod));
     }
@@ -119,6 +121,7 @@ def _convolve(conv, hidden: mx.array, dynamic: mx.array, which: int) -> mx.array
             ("G", width // conv.group_size),
             ("KS", conv.kernel_size),
             ("SET", which),
+            ("SETS", dynamic.shape[2] if dynamic.ndim == 5 else 1),
         ],
         grid=(hidden.size, 1, 1),
         threadgroup=(256, 1, 1),
@@ -126,6 +129,34 @@ def _convolve(conv, hidden: mx.array, dynamic: mx.array, which: int) -> mx.array
         output_dtypes=[hidden.dtype],
     )
     return out
+
+
+def apply_dflash_conv_patch() -> bool:
+    """Reuse the batched convolution kernel in dflash-mlx's DFlash2 layers."""
+    from dflash_mlx import model
+
+    original = model._grouped_dynamic_convolve
+    if getattr(original, "_omlx_fused_conv", False):
+        return False
+
+    @wraps(original)
+    def convolve(hidden, dynamic, base, group_size):
+        if (
+            mx.default_device().type != mx.gpu
+            or hidden.dtype not in (mx.bfloat16, mx.float16)
+            or dynamic.dtype != hidden.dtype
+            or hidden.size == 0
+        ):
+            return original(hidden, dynamic, base, group_size)
+        conv = SimpleNamespace(
+            base_kernel=base, kernel_size=base.shape[0], group_size=group_size
+        )
+        return _convolve(conv, hidden, dynamic, 0)
+
+    convolve._omlx_fused_conv = True
+    model._grouped_dynamic_convolve = convolve
+    logger.info("DFlash2 dynamic convolution fusion enabled")
+    return True
 
 
 def _conv_prepare(conv, hidden: mx.array) -> tuple[mx.array, mx.array]:
