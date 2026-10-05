@@ -976,6 +976,7 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
         window_used = getattr(runtime_cfg, "draft_window_size", "?")
         sink_used = getattr(runtime_cfg, "draft_sink_size", "?")
         verify_used = getattr(runtime_cfg, "verify_mode", "?")
+        step_used = getattr(runtime_cfg, "prefill_step_size", "?")
         logger.info(
             f"DFlashEngine loaded: target={self._model_name}, "
             f"draft={self._draft_model_path}, "
@@ -983,7 +984,8 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
             f"fallback={self._fallback_engine_type}, "
             f"native_cache={self._native_cache is not None}, "
             f"l2_cache={self._resolve_dflash_l2_dir() is not None}, "
-            f"draft_window={window_used}, draft_sink={sink_used}, verify={verify_used}"
+            f"draft_window={window_used}, draft_sink={sink_used}, verify={verify_used}, "
+            f"prefill_step={step_used}"
         )
 
     def _record_prefill_guard_active_memory(self) -> None:
@@ -1497,6 +1499,16 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
                             cache._hits += int(restored > 0) - int(prefix_flow.hit_tokens > 0)
                             cache._misses += int(restored == 0) - int(prefix_flow.hit_tokens == 0)
                         prefix_flow.hit_tokens = restored
+                        computed = max(0, event.prefill_tokens_computed)
+                        prefill_s = event.prefill_us / 1e6
+                        logger.info(
+                            "DFlash prefill: %.1f tok/s over %d computed tokens "
+                            "(%.0fms, %d restored from prefix cache)",
+                            computed / prefill_s if prefill_s > 0 else 0.0,
+                            computed,
+                            event.prefill_us / 1000.0,
+                            restored,
+                        )
                     yield event
             finally:
                 close = getattr(event_iter, "close", None)
