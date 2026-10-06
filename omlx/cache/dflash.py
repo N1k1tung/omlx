@@ -775,6 +775,11 @@ class NativeSnapshotService:
             self._published_tip = tip
             if context_saved:
                 self._published_context_tip = tip
+            if self.previous_tip is None:
+                # A cold request's prompt is the fallback for its generation snapshot.
+                self.previous_tip = tip
+                if context_saved:
+                    self.previous_context_tips = (tip,)
         elapsed = (time.perf_counter() - started) * 1000
         self.insert_ms = previous_insert_ms + elapsed
         return SnapshotPublication(
