@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from types import SimpleNamespace
 import pytest
 import mlx.core as mx
@@ -57,13 +58,65 @@ class Ops:
     def extract_context_feature(self, captured, layer_ids):
         return captured[1]
 
+    def embed_tokens(self, model):
+        # The test model has no embeddings; draft tokens only flow through
+        # forward_with_hidden_capture, so a constant table is enough.
+        return lambda ids: mx.zeros((ids.shape[0], ids.shape[1], 4))
+
+    def logits_from_hidden(self, model, hidden):
+        return mx.zeros((1, hidden.shape[1], 8)) + mx.arange(8)
+
+    def arm_rollback(self, cache_entries, *, prefix_len):
+        for entry in cache_entries:
+            if hasattr(entry, "arm_rollback"):
+                entry.arm_rollback(prefix_len=prefix_len)
+
+    def verify_block(self, *, target_model, verify_ids, target_cache, capture_layer_ids):
+        return self.forward_with_hidden_capture(
+            target_model,
+            input_ids=verify_ids,
+            cache=target_cache,
+            capture_layer_ids=capture_layer_ids,
+            logits_last_only=False,
+        )
+
+    def restore_after_acceptance(
+        self, cache_entries, *, target_len, acceptance_length, drafted_tokens=0
+    ):
+        for entry in cache_entries:
+            if hasattr(entry, "rollback"):
+                entry.rollback(max(0, int(acceptance_length)))
+        return 0
+
     def cleanup_generation_caches(self, target, draft):
-        target.clear()
-        draft.clear()
+        for entry in target:
+            clear = getattr(entry, "clear", None)
+            if callable(clear):
+                clear()
+        for entry in draft:
+            clear = getattr(entry, "clear", None)
+            if callable(clear):
+                clear()
 
 
-@pytest.fixture
-def setup(tmp_path, monkeypatch):
+def _fake_draft_hidden(noise_embedding, draft_context):
+    """Drafter stand-in: seq_len = 1 staged token + (block_len - 1) noise rows."""
+    import mlx.core as mx
+
+    if isinstance(draft_context, bridge.TargetHiddenChunks):
+        context = draft_context.slice(
+            max(0, draft_context.total_len - 4), draft_context.total_len
+        )
+    else:
+        context = draft_context
+    rows = max(1, int(noise_embedding.shape[1]))
+    return mx.concatenate(
+        [context[:, -1:, :], mx.zeros((1, rows - 1, context.shape[-1]))], axis=1
+    )
+
+
+@contextmanager
+def install_fixtures(tmp_path, monkeypatch):
     import mlx_lm.models.cache as lm_cache
 
     monkeypatch.setattr(lm_cache, "PoolingCache", PoolingCache, raising=False)
@@ -82,6 +135,14 @@ def setup(tmp_path, monkeypatch):
         target_layer_ids=[0],
         args=SimpleNamespace(sliding_window=4, layer_types=["sliding_attention"]),
         project_target_hidden=lambda x: x * 2,
+        block_size=2,
+        mask_token_id=0,
+        layers=[None],
+        embed_scale=1.0,
+        norm=lambda x: x,
+        forward_projected_context=lambda *, noise_embedding, draft_context, cache=None: (
+            _fake_draft_hidden(noise_embedding, draft_context)
+        ),
     )
     draft_backend = SimpleNamespace(make_cache=lambda **kwargs: [])
     tokenizer = SimpleNamespace(chat_template="")
@@ -107,6 +168,12 @@ def setup(tmp_path, monkeypatch):
         yield cache, draft, draft_backend, provider, context
     finally:
         cache.close()
+
+
+@pytest.fixture
+def setup(tmp_path, monkeypatch):
+    with install_fixtures(tmp_path, monkeypatch) as fixtures:
+        yield fixtures
 
 
 def prefill(setup, tokens):
@@ -735,10 +802,18 @@ def test_native_memory_waterfall_preserves_cache_byte_counts(setup, monkeypatch)
     cache, *_ = setup
     monkeypatch.setattr(cache.ssd, "get_stats_dict", lambda: {
         "hot_cache_size_bytes": 123, "total_size": 456,
+        "prefix_context_count": 2, "prefix_context_size_bytes": 654,
     })
     fields = prefix_cache_memory_fields(cache.memory_waterfall_bytes())
     assert fields["l1_snapshot_bytes"] == 123
     assert fields["l2_disk_bytes"] == 456
+    assert fields["l1_snapshot_draft_context_bytes"] == 654
+    assert fields["l1_snapshot_target_hidden_bytes"] == 654
+    # Raw counts survive only through collect_memory_waterfall's extra dict;
+    # the whitelisted field filter drops them here. The whitelisted byte
+    # buckets are the dashboard-visible signal.
+    assert cache.memory_waterfall_bytes()["prefix_context_files"] == 2
+    assert cache.memory_waterfall_bytes()["prefix_context_bytes"] == 654
 
 
 def test_required_snapshot_logits_fail_before_publication(setup):

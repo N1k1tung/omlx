@@ -31,7 +31,7 @@ from omlx.cache.paged_ssd_cache import (
     cachelist_subtypes_from_cache_list,
     numerics_revision_for_model,
 )
-from omlx.cache.prefix_cache import BlockAwarePrefixCache
+from omlx.cache.prefix_cache import BlockAwarePrefixCache, _TIP_LINEAGE_MAX_ENTRIES
 from omlx.cache.state import cache_block_size, extract_cache_states, restore_cache
 from omlx.cache.type_registry import CacheTypeRegistry
 
@@ -257,6 +257,10 @@ class DFlashNativeCache:
             raise ValueError("Target backend did not provide native cache templates")
         self.layer_types = [CacheTypeRegistry.canonical_name(c) for c in self.templates]
         self.block_size = int(getattr(config, "paged_cache_block_size", 256))
+        # Publication hash -> newest/previous successful contexts. Keying by
+        # the matched tip keeps unrelated conversations independent, including
+        # target-only publications whose context write failed.
+        self._context_tips: dict[tuple[str, bytes], tuple[bytes, ...]] = {}
         leaves = []
 
         def visit(c):
@@ -432,6 +436,10 @@ class DFlashNativeCache:
         snapshot = None
         ready_from = 0
         found = self._lookup(prompt, reconstruct=False)
+        context = None
+        previous_tip = found[1] if found is not None else None
+        if previous_tip not in self.prefix._store_tip_hashes:
+            previous_tip = self.prefix._tip_lineage.get(previous_tip, previous_tip)
         if found is not None:
             n, tip, caches = found
             context = self.ssd.load_prefix_context(tip, signature)
@@ -545,7 +553,12 @@ class DFlashNativeCache:
         self._misses += int(hit_tokens == 0)
         self._tokens_saved += hit_tokens
         service = NativeSnapshotService(
-            self, draft_model, signature, runtime, ready_from
+            self, draft_model, signature, runtime, ready_from,
+            previous_tip=previous_tip,
+            previous_context_tips=self._context_tips.get(
+                (signature, previous_tip),
+                (found[1],) if context is not None else (),
+            ),
         )
         return PrefixCacheFlow(
             cache_manager=self,
@@ -557,6 +570,25 @@ class DFlashNativeCache:
             hit_kind="native" if hit_tokens else "miss",
             lookup_ms=(time.perf_counter() - started) * 1000,
         )
+
+    def prune_context_tips(
+        self, signature: str, tip: bytes, *, saved: bool,
+        previous_tips: tuple[bytes, ...], replaced_tip: bytes | None,
+    ) -> None:
+        """Retain this turn and its predecessor, replacing same-turn checkpoints."""
+        if saved:
+            tips = (tip,) + tuple(t for t in previous_tips[:1] if t != tip)
+            for stale in (*previous_tips[1:], replaced_tip):
+                if stale is not None and stale not in tips:
+                    self.ssd.forget_prefix_context(stale, signature)
+        else:
+            tips = (
+                (replaced_tip,) + previous_tips[:1]
+                if replaced_tip is not None else previous_tips
+            )
+        self._context_tips[signature, tip] = tips
+        if len(self._context_tips) > _TIP_LINEAGE_MAX_ENTRIES:
+            self._context_tips.clear()
 
     def clear(self, *, hot=False, ssd=False):
         report = {"hot_cleared": 0, "ssd_deleted": 0, "ranks": []}
@@ -574,6 +606,7 @@ class DFlashNativeCache:
             self.prefix.paged_ssd_cache = self.ssd
         elif hot:
             report["hot_cleared"] = self.ssd.clear_hot_cache()
+        self._context_tips.clear()
         self._hits = self._misses = self._tokens_saved = 0
         return report
 
@@ -582,6 +615,13 @@ class DFlashNativeCache:
         return {
             "l1_snapshot_bytes": stats["hot_cache_size_bytes"],
             "l2_disk_bytes": stats["total_size"],
+            # Native-side durable drafter contexts map onto the runtime's
+            # draft-context snapshot bucket. prefix_cache_memory_bytes()
+            # whitelists names, so the raw counts ride the same bucket.
+            "l1_snapshot_draft_context_bytes": stats["prefix_context_size_bytes"],
+            "l1_snapshot_target_hidden_bytes": stats["prefix_context_size_bytes"],
+            "prefix_context_files": stats["prefix_context_count"],
+            "prefix_context_bytes": stats["prefix_context_size_bytes"],
         }
 
     def close(self):
@@ -594,12 +634,19 @@ class DFlashNativeCache:
 
 
 class NativeSnapshotService:
-    def __init__(self, cache, draft_model, signature, runtime, ready_from=0):
+    def __init__(
+        self, cache, draft_model, signature, runtime, ready_from=0, *,
+        previous_tip=None, previous_context_tips=(),
+    ):
         self.cache = cache
         self.draft_model = draft_model
         self.signature = signature
         self.runtime = runtime
         self.ready_from = ready_from
+        self.previous_tip = previous_tip
+        self.previous_context_tips = previous_context_tips
+        self._published_tip = None
+        self._published_context_tip = None
         self.insert_ms = 0.0
         self.active = True
 
@@ -644,11 +691,15 @@ class NativeSnapshotService:
                 states,
                 model_cache_config=model_config,
                 boundary_snapshots=boundaries,
-                _store_tail_terminal=bool(n % self.cache.block_size),
+                _store_tail_terminal=True,
+                _track_tip_lineage=False,
             )
-            # ponytail: generation may skip a block boundary. Native storage
+            # generation may skip a block boundary. Native storage
             # then retains the earlier checkpoint; committed-boundary callbacks
             # in dflash-mlx would let composite caches retain the continuation.
+            # Boundary stores walk the whole prefix chain (O(n/block)); the
+            # upgrade path is a continuation store keyed off the previous
+            # checkpoint instead of re-fetching the full prompt.
             if table is None or table.num_tokens != n:
                 return None
             return self.cache.paged.allocated_blocks[table.block_ids[-1]].block_hash
@@ -683,6 +734,7 @@ class NativeSnapshotService:
         started = time.perf_counter()
         previous_insert_ms = self.insert_ms
         admitted = False
+        context_saved = False
         try:
             tip = self.store_target(token_ids, target_cache)
             admitted = tip is not None
@@ -698,7 +750,7 @@ class NativeSnapshotService:
                 tensors = {f"hidden_{i}": value for i, value in enumerate(chunks)}
                 if last_logits is not None:
                     tensors["logits"] = last_logits
-                self.cache.ssd.save_prefix_context(
+                context_saved = self.cache.ssd.save_prefix_context(
                     tip,
                     self.signature,
                     tensors,
@@ -707,6 +759,22 @@ class NativeSnapshotService:
                 )
         except (OSError, ValueError, TypeError, RuntimeError) as exc:
             logger.warning("DFlash native cache publication failed: %s", exc)
+        if admitted:
+            self.cache.prefix.record_tip(tip, self.previous_tip, self.cache.layer_types)
+            if (
+                self._published_tip is not None
+                and self._published_tip not in (tip, self.previous_tip)
+                and (context_saved or self._published_tip != self._published_context_tip)
+            ):
+                self.cache.prefix._retire_tip(self._published_tip, self.cache.layer_types)
+            self.cache.prune_context_tips(
+                self.signature, tip, saved=context_saved,
+                previous_tips=self.previous_context_tips,
+                replaced_tip=self._published_context_tip,
+            )
+            self._published_tip = tip
+            if context_saved:
+                self._published_context_tip = tip
         elapsed = (time.perf_counter() - started) * 1000
         self.insert_ms = previous_insert_ms + elapsed
         return SnapshotPublication(
