@@ -499,14 +499,20 @@ def compute_image_hash(images: List[Image.Image]) -> Optional[str]:
     return hasher.hexdigest()
 
 
-def compute_per_image_hashes(images: List[Image.Image]) -> List[str]:
+def compute_per_image_hashes(
+    images: List[Image.Image], *, cumulative: bool = False
+) -> List[str]:
     """Compute individual SHA256 hashes for each image.
 
     Returns a list of hex-encoded hash strings, one per image.
+    With cumulative=True, each hash includes all preceding images, matching
+    compute_image_hash(images[:i + 1]) without repeatedly hashing their pixels.
     """
     hashes = []
+    hasher = hashlib.sha256()
     for img in images:
-        hasher = hashlib.sha256()
+        if not cumulative:
+            hasher = hashlib.sha256()
         hasher.update(f"{img.size[0]}x{img.size[1]}".encode())
         rgb_img = img.convert("RGB")
         hasher.update(rgb_img.tobytes())

@@ -278,11 +278,13 @@ class Glm5NextTargetOps:
     # layer in flight) above this width to bound prefill memory.
     pipeline_min_tokens = 256
 
-    def with_prompt_embeddings(self, embeddings: mx.array) -> Glm5NextTargetOps:
+    def with_prompt_embeddings(
+        self, embeddings: mx.array, *, start: int = 0
+    ) -> Glm5NextTargetOps:
         """Bind vision prefill to this request without mutating shared target ops."""
         ops = copy.copy(self)
-        ops._prompt_embeddings = embeddings
-        ops._prompt_offset = 0
+        ops._prompt_embeddings = embeddings if start < embeddings.shape[1] else None
+        ops._prompt_offset = start
         return ops
 
     def model_type(self, target_model: Any) -> str:

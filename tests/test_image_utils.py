@@ -572,6 +572,12 @@ class TestComputePerImageHashes:
         """Empty list returns empty list."""
         assert compute_per_image_hashes([]) == []
 
+    def test_cumulative_hashes_match_prefixes(self):
+        images = [_make_test_image(4, 4, c) for c in ("red", "green", "blue")]
+        assert compute_per_image_hashes(images, cumulative=True) == [
+            compute_image_hash(images[:i + 1]) for i in range(len(images))
+        ]
+
 
 # =============================================================================
 # Tests: load_image decode cache

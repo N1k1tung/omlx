@@ -364,10 +364,12 @@ class DFlashNativeCache:
             self.ssd.close()
             raise
 
-    def _lookup(self, tokens, *, reconstruct=True):
+    def _lookup(self, tokens, *, reconstruct=True, cache_key_kwargs=None):
         request_id = uuid.uuid4().hex
         try:
-            table, _ = self.prefix.fetch_cache(request_id, tokens)
+            table, _ = self.prefix.fetch_cache(
+                request_id, tokens, **(cache_key_kwargs or {})
+            )
             if table is None or not table.num_tokens or not table.block_ids:
                 return None
             if not reconstruct:
@@ -403,6 +405,8 @@ class DFlashNativeCache:
         prompt,
         max_new_tokens,
         runtime_context,
+        cache_key_kwargs=None,
+        prompt_embeddings=None,
     ):
         started = time.perf_counter()
         key = build_prefix_key(model_provider, draft_model, runtime_context)
@@ -439,7 +443,9 @@ class DFlashNativeCache:
         )
         snapshot = None
         ready_from = 0
-        found = self._lookup(prompt, reconstruct=False)
+        found = self._lookup(
+            prompt, reconstruct=False, cache_key_kwargs=cache_key_kwargs
+        )
         context = None
         previous_tip = found[1] if found is not None else None
         if previous_tip not in self.prefix._store_tip_hashes:
@@ -497,7 +503,9 @@ class DFlashNativeCache:
                 except (KeyError, TypeError, ValueError):
                     snapshot = None
         if snapshot is not None:
-            restored = self._lookup(prompt[:snapshot.prefix_len])
+            restored = self._lookup(
+                prompt[:snapshot.prefix_len], cache_key_kwargs=cache_key_kwargs
+            )
             if restored is None or restored[0] != snapshot.prefix_len:
                 snapshot = None
             else:
@@ -506,7 +514,9 @@ class DFlashNativeCache:
             # A target-only entry can skip a prefix while recomputing a complete
             # drafter window and recovering real sink features separately.
             cutoff = len(prompt) - window
-            recovered = self._lookup(prompt[:cutoff]) if cutoff > max(sink, 1) else None
+            recovered = self._lookup(
+                prompt[:cutoff], cache_key_kwargs=cache_key_kwargs
+            ) if cutoff > max(sink, 1) else None
             if recovered is not None:
                 n, _, caches = recovered
                 if n > max(sink, 1) and len(prompt) - n >= window:
@@ -532,6 +542,8 @@ class DFlashNativeCache:
                                     i + 1 for i in key.capture_layer_ids
                                 },
                                 logits_last_only=True,
+                                **({"input_embeddings": prompt_embeddings[:, :sink]}
+                                   if prompt_embeddings is not None else {}),
                             )
                             features = self.target_ops.extract_context_feature(
                                 captured, draft_model.target_layer_ids
@@ -563,6 +575,7 @@ class DFlashNativeCache:
                 (signature, previous_tip),
                 (found[1],) if context is not None else (),
             ),
+            cache_key_kwargs=cache_key_kwargs,
         )
         return PrefixCacheFlow(
             cache_manager=self,
@@ -641,6 +654,7 @@ class NativeSnapshotService:
     def __init__(
         self, cache, draft_model, signature, runtime, ready_from=0, *,
         previous_tip=None, previous_context_tips=(),
+        cache_key_kwargs=None,
     ):
         self.cache = cache
         self.draft_model = draft_model
@@ -654,6 +668,7 @@ class NativeSnapshotService:
         self._prefill_request_id = None
         self.insert_ms = 0.0
         self.active = True
+        self.cache_key_kwargs = cache_key_kwargs or {}
 
     def should_publish_frontier(self, prefix_len):
         # The target proxy already stores every boundary. Keep drafter context
@@ -676,7 +691,9 @@ class NativeSnapshotService:
             compact_pooling_cache_snapshot(states, n, self.cache.block_size)
             compact_deepseek_v41_snapshot(states, n, self.cache.block_size)
             if self.cache.paged.get_block_table(request_id) is None:
-                self.cache.prefix.fetch_cache(request_id, token_ids)
+                self.cache.prefix.fetch_cache(
+                    request_id, token_ids, **self.cache_key_kwargs
+                )
             boundaries = {n: states}
             if self.cache.boundary_store is not None:
                 from omlx.scheduler import _BoundarySnapshotProvider
@@ -701,6 +718,7 @@ class NativeSnapshotService:
                 boundary_snapshots=boundaries,
                 _store_tail_terminal=True,
                 _track_tip_lineage=False,
+                **self.cache_key_kwargs,
             )
             # generation may skip a block boundary. Native storage
             # then retains the earlier checkpoint; committed-boundary callbacks
@@ -782,11 +800,13 @@ class NativeSnapshotService:
             self._published_tip = tip
             if context_saved:
                 self._published_context_tip = tip
-            if self.previous_tip is None:
-                # A cold request's prompt is the fallback for its generation snapshot.
+            if kind == "prefill" or self.previous_tip is None:
+                # Retain each prompt, or bootstrap the first admitted checkpoint.
                 self.previous_tip = tip
                 if context_saved:
-                    self.previous_context_tips = (tip,)
+                    self.previous_context_tips = (tip,) + tuple(
+                        t for t in self.previous_context_tips[:1] if t != tip
+                    )
         elapsed = (time.perf_counter() - started) * 1000
         self.insert_ms = previous_insert_ms + elapsed
         return SnapshotPublication(

@@ -176,7 +176,7 @@ def setup(tmp_path, monkeypatch):
         yield fixtures
 
 
-def prefill(setup, tokens):
+def prefill(setup, tokens, *, cache_key_kwargs=None):
     cache, draft, backend, provider, context = setup
     flow = cache.for_request(
         model_provider=provider,
@@ -185,6 +185,7 @@ def prefill(setup, tokens):
         prompt=tokens,
         max_new_tokens=3,
         runtime_context=context,
+        cache_key_kwargs=cache_key_kwargs,
     )
     ops = bridge.NativeCacheTargetOps(provider.target_ops)
     session = SpeculativeSession.open(
@@ -368,6 +369,50 @@ def test_changed_drafter_reuses_target_and_replays_features(setup):
     assert warm.prefill_logits.tolist() == cold.prefill_logits.tolist()
     expected = mx.array(tokens[-4:], dtype=mx.float32)[None, :, None] * 2
     assert mx.array_equal(result.feature_store.current_hidden.slice(len(tokens) - 4, len(tokens)), expected).item()
+
+
+@pytest.mark.parametrize("changed_image,expected", [(0, 2046), (1, 4094), (2, 4101)])
+def test_image_keys_preserve_prefix_before_changed_or_appended_images(setup, changed_image, expected):
+    tokens = [i % 7 + 1 for i in range(4101)]
+    keys = {"extra_key_ranges": [(2050, ("first",)), (4099, ("both",))]}
+    prefill(setup, tokens, cache_key_kwargs=keys)
+    ranges = list(keys["extra_key_ranges"])
+    if changed_image < 2:
+        start, _ = ranges[changed_image]
+        ranges[changed_image] = (start, ("changed",))
+    else:
+        ranges.append((4103, ("three",)))
+        tokens += [1] * 8
+    flow, _, state, _, _ = prefill(
+        setup, tokens, cache_key_kwargs={"extra_key_ranges": ranges}
+    )
+    assert flow.hit_tokens == expected
+    assert state.prefill_logits[0, 0, 0].item() == sum(tokens)
+
+
+def test_target_only_image_hit_recovers_sink_with_vision_embeddings(setup, monkeypatch):
+    cache, draft, _, provider, context = setup
+    tokens = [i % 7 + 1 for i in range(4101)]
+    keys = {"extra_key_ranges": [(0, ("image",))]}
+    prefill(setup, tokens, cache_key_kwargs=keys)
+    provider.draft_cache_identity = "new-projection"
+    embeddings = mx.arange(len(tokens) * 2).reshape(1, len(tokens), 2)
+    sink_inputs = []
+    forward = provider.target_ops.forward_with_hidden_capture
+
+    def capture_sink(model, *, input_embeddings, **kwargs):
+        sink_inputs.append(input_embeddings)
+        return forward(model, **kwargs)
+
+    monkeypatch.setattr(provider.target_ops, "forward_with_hidden_capture", capture_sink)
+    flow = cache.for_request(
+        model_provider=provider, draft_model=draft, tokenizer=provider.tokenizer,
+        prompt=tokens, max_new_tokens=3, runtime_context=context,
+        cache_key_kwargs=keys, prompt_embeddings=embeddings,
+    )
+    assert flow.hit_tokens == 4094
+    assert len(sink_inputs) == 1
+    assert mx.array_equal(sink_inputs[0], embeddings[:, :2]).item()
 
 
 @pytest.mark.parametrize("hot_only", [False, True])

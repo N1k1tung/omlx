@@ -385,6 +385,7 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
         self._tokenizer_obj = None
         self._executor_tokenizer = None
         self._processor = None
+        self._vision_cache = None
         self._loaded = False
         # DFlash runs outside Scheduler, so memory-pressure aborts cannot use
         # EngineCore's request registry. Keep the stop events for every
@@ -1002,8 +1003,13 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
 
     def _close_native_cache(self):
         cache, self._native_cache = self._native_cache, None
-        if cache is not None:
-            cache.close()
+        vision_cache, self._vision_cache = getattr(self, "_vision_cache", None), None
+        try:
+            if cache is not None:
+                cache.close()
+        finally:
+            if vision_cache is not None:
+                vision_cache.close()
 
     @property
     def prefix_cache_enabled(self) -> bool:
@@ -1512,6 +1518,9 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
         repetition_context_size: int = 20,
         skip_cache_store: bool = False,
         prompt_embeddings: mx.array | None = None,
+        vlm_image_hash: str | None = None,
+        vlm_cache_key_start: int = 0,
+        vlm_cache_key_ranges: list[tuple[int, str]] | None = None,
     ):
         """Build the dflash event iterator with prefix cache plumbed in."""
         from dflash_mlx.runtime import stream_dflash_generate
@@ -1538,18 +1547,16 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
 
         from ..cache.dflash import NativeCacheTargetOps
 
-        if prompt_embeddings is not None:
-            if (
-                prompt_embeddings.ndim != 3
-                or prompt_embeddings.shape[:2] != (1, len(prompt_tokens))
-            ):
-                raise ValueError("DFlash prompt embeddings must match prompt token IDs")
-            # Token-only prefix keys alias different images. Bypass reads and
-            # writes until the native cache supports image-aware identities.
+        if prompt_embeddings is not None and (
+            prompt_embeddings.ndim != 3
+            or prompt_embeddings.shape[:2] != (1, len(prompt_tokens))
+        ):
+            raise ValueError("DFlash prompt embeddings must match prompt token IDs")
+        if prompt_embeddings is not None and not vlm_image_hash:
+            # Direct embedding callers must provide an image identity for reuse.
             prefix_flow = PrefixCacheFlow(
                 cache_manager=None, publish_generation_snapshot=False
             )
-            target_ops = self._target_ops.with_prompt_embeddings(prompt_embeddings)
         else:
             prefix_flow = (self._native_cache.for_request if self._native_cache else PrefixCacheFlow.for_request)(
                 model_provider=_ModelProviderShim(),
@@ -1558,11 +1565,27 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
                 prompt=prompt_tokens,
                 max_new_tokens=max_tokens,
                 runtime_context=self._runtime_context,
+                **({
+                    "cache_key_kwargs": {
+                        "extra_keys": (vlm_image_hash,) if vlm_image_hash else None,
+                        "extra_key_token_start": vlm_cache_key_start,
+                        "extra_key_ranges": [
+                            (start, (image_hash,))
+                            for start, image_hash in vlm_cache_key_ranges
+                        ] if vlm_cache_key_ranges else None,
+                    },
+                    "prompt_embeddings": prompt_embeddings,
+                } if self._native_cache else {}),
             )
-            target_ops = (
-                NativeCacheTargetOps(self._target_ops)
-                if self._native_cache else self._target_ops
+        target_ops = (
+            self._target_ops.with_prompt_embeddings(
+                prompt_embeddings,
+                start=prefix_flow.snapshot.prefix_len if prefix_flow.snapshot else 0,
             )
+            if prompt_embeddings is not None else self._target_ops
+        )
+        if self._native_cache and prefix_flow.cache_manager is self._native_cache:
+            target_ops = NativeCacheTargetOps(target_ops)
         if skip_cache_store and prefix_flow.snapshot_service is not None:
             if self._native_cache:
                 prefix_flow.snapshot_service.active = False
@@ -1683,6 +1706,7 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
         stop_event: threading.Event,
         skip_cache_store: bool = False,
         prompt_embeddings: mx.array | None = None,
+        multimodal_kwargs: dict[str, Any] | None = None,
     ) -> None:
         """Run dflash generation with streaming on MLX executor thread.
 
@@ -1711,6 +1735,7 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
                 repetition_context_size=repetition_context_size,
                 skip_cache_store=skip_cache_store,
                 prompt_embeddings=prompt_embeddings,
+                **(multimodal_kwargs or {}),
             )
             prompt_embeddings = None
             self._record_prefill_guard_active_memory()
@@ -1916,6 +1941,10 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
         tools = kwargs.pop("tools", None)
         seed = kwargs.pop("seed", None)
         skip_cache_store = bool(kwargs.pop("skip_cache_store", False))
+        multimodal_kwargs = {
+            k: kwargs[k] for k in ("vlm_image_hash", "vlm_cache_key_start", "vlm_cache_key_ranges")
+            if k in kwargs
+        }
         repetition_context_size = kwargs.pop("repetition_context_size", None)
         if repetition_context_size is None:
             repetition_context_size = 20
@@ -1953,6 +1982,7 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
                     repetition_context_size=int(repetition_context_size),
                     skip_cache_store=skip_cache_store,
                     prompt_embeddings=prompt_embeddings,
+                    **multimodal_kwargs,
                 )
                 prompt_embeddings = None
                 self._record_prefill_guard_active_memory()
@@ -2163,6 +2193,10 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
         tools = kwargs.pop("tools", None)
         seed = kwargs.pop("seed", None)
         skip_cache_store = bool(kwargs.pop("skip_cache_store", False))
+        multimodal_kwargs = {
+            k: kwargs[k] for k in ("vlm_image_hash", "vlm_cache_key_start", "vlm_cache_key_ranges")
+            if k in kwargs
+        }
         repetition_context_size = kwargs.pop("repetition_context_size", None)
         if repetition_context_size is None:
             repetition_context_size = 20
@@ -2210,6 +2244,7 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
                 stop_event,
                 skip_cache_store=skip_cache_store,
                 prompt_embeddings=prompt_embeddings,
+                multimodal_kwargs=multimodal_kwargs,
             )
             prompt_embeddings = None
         except Exception:
@@ -2302,12 +2337,13 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
         encode_vision: bool = True,
         add_generation_prompt: bool | None = None,
         add_special_tokens: bool | None = None,
-    ) -> tuple[list[int], mx.array | None, str | None]:
+    ) -> tuple[list[int], mx.array | None, str | None, list[tuple[int, str]]]:
         """Prepare GLM vision input on the same MLX thread as generation."""
         from mlx_vlm.utils import prepare_inputs
 
-        from ..utils.image import compute_image_hash, extract_images_from_messages
-        from .vlm import VLMBatchedEngine
+        from ..cache.vision_feature_cache import VisionFeatureSSDCache
+        from ..utils.image import compute_per_image_hashes, extract_images_from_messages
+        from .vlm import VLMBatchedEngine, _grid_image_token_starts
 
         _, images, audio = extract_images_from_messages(messages)
         if audio:
@@ -2349,13 +2385,48 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
             add_special_tokens=False if add_special_tokens is None else add_special_tokens,
         )
         input_ids = inputs["input_ids"]
+        token_ids = input_ids[0].tolist()
         embeddings = None
+        image_hash = None
+        cache_key_ranges = []
         if encode_vision:
+            grid = inputs["image_grid_thw"]
+            starts = _grid_image_token_starts(
+                token_ids, grid, self._target_model.config.image_token_id,
+                processor.image_processor.merge_size,
+            )
+            cumulative_hashes = compute_per_image_hashes(images, cumulative=True)
+            cache_key_ranges = list(zip(starts, cumulative_hashes, strict=True))
+            image_hash = cumulative_hashes[-1]
+            if self._vision_cache is None:
+                root = self._resolve_dflash_l2_dir()
+                self._vision_cache = VisionFeatureSSDCache(
+                    cache_dir=root / "vision_features" if root else None,
+                    max_memory_entries=4096,
+                )
+            image_features = []
+            offset = 0
+            for i, image_key in enumerate(compute_per_image_hashes(images)):
+                image_grid = grid[i].tolist()
+                rows = math.prod(image_grid)
+                features = self._vision_cache.get(image_key, self._model_name)
+                if features is None or self._vision_cache.get_grid(
+                    image_key, self._model_name
+                ) != image_grid:
+                    features = self._target_model.encode_image(
+                        inputs["pixel_values"][offset:offset + rows], grid[i:i + 1]
+                    )
+                    mx.eval(features)
+                    self._vision_cache.put(
+                        image_key, self._model_name, features, grid=image_grid
+                    )
+                image_features.append(features)
+                offset += rows
+            inputs["cached_image_features"] = mx.concatenate(image_features, axis=0)
             features = self._target_model.get_input_embeddings(**inputs)
             embeddings = features.inputs_embeds
             mx.eval(embeddings)
-        image_hash = compute_image_hash(images) if encode_vision else None
-        return input_ids[0].tolist(), embeddings, image_hash
+        return token_ids, embeddings, image_hash, cache_key_ranges
 
     async def _prepare_chat_prompt(
         self,
@@ -2372,7 +2443,7 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
 
             add_generation_prompt = kwargs.pop("add_generation_prompt", None)
             add_special_tokens = kwargs.pop("add_special_tokens", None)
-            prompt, embeddings, image_hash = await asyncio.get_running_loop().run_in_executor(
+            prompt, embeddings, image_hash, cache_key_ranges = await asyncio.get_running_loop().run_in_executor(
                 get_mlx_executor(),
                 lambda: self._prepare_multimodal_prompt(
                     messages, tools, ct_kwargs, is_partial,
@@ -2382,6 +2453,8 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
                 ),
             )
             kwargs["vlm_image_hash"] = image_hash
+            kwargs["vlm_cache_key_ranges"] = cache_key_ranges
+            kwargs["vlm_cache_key_start"] = cache_key_ranges[0][0] if cache_key_ranges else 0
             return prompt, embeddings
         prompt = self._apply_chat_template(
             messages,

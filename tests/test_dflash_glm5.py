@@ -132,15 +132,15 @@ def test_mhc_capture_contract_is_the_stream_mean():
         _contract_mhc_hidden(mx.zeros((2, 6)))
 
 
-def test_image_prefill_and_rejected_dflash2_drafts_match_vlm(monkeypatch):
+@pytest.mark.parametrize("prefix_cache", [False, True])
+def test_image_prefill_and_rejected_dflash2_drafts_match_vlm(monkeypatch, tmp_path, prefix_cache):
     """Vision conditioning survives chunked prefill and repeated rollback."""
-    from unittest.mock import MagicMock
-
     from dflash_mlx.draft_backend import EagerDraftBackend
     from dflash_mlx.engine.events import SummaryEvent
     from dflash_mlx.model import DFlash2DraftModel, DFlashDraftModelArgs
     from dflash_mlx.runtime.context import build_offline_runtime_context
 
+    from omlx.cache.dflash import DFlashNativeCache, install_native_cache_hooks
     from omlx.engine.dflash import DFlashEngine
     from omlx.patches.dflash_glm5 import (
         Glm5NextTargetOps,
@@ -187,13 +187,20 @@ def test_image_prefill_and_rejected_dflash2_drafts_match_vlm(monkeypatch):
     engine._runtime_context = build_offline_runtime_context(
         verify_mode="dflash", copyspec_mode="off", draft_sink_size=0, draft_window_size=16
     )
-    engine._native_cache = MagicMock()
+    if prefix_cache:
+        native_options = dict(
+            model=target, target_ops=ops, model_name="tiny-glm", cache_dir=tmp_path,
+            config=SimpleNamespace(paged_cache_block_size=2048),
+            hot_cache_max_bytes=2**26, max_size_bytes=2**26,
+        )
+        engine._native_cache = DFlashNativeCache(**native_options)
+        install_native_cache_hooks()
     tokens = [1, 120, 2, 3, 4, 5]
     ids = mx.array([tokens], dtype=mx.int32)
     grid = mx.array([[1, 2, 2]], dtype=mx.int32)
     ops.install_speculative_hooks(target)
     try:
-        for pixels in (mx.zeros((4, 24)), mx.ones((4, 24))):
+        for i, pixels in enumerate((mx.zeros((4, 24)), mx.ones((4, 24)))):
             embeds = target.get_input_embeddings(ids, pixels, image_grid_thw=grid).inputs_embeds
             reference_cache = target.language_model.make_cache()
             reference = target(ids, pixels, image_grid_thw=grid, cache=reference_cache).logits
@@ -216,23 +223,62 @@ def test_image_prefill_and_rejected_dflash2_drafts_match_vlm(monkeypatch):
                 token = int(mx.argmax(logits, axis=-1).item())
                 expected.append(token)
                 reference = target(mx.array([[token]]), cache=reference_cache).logits
-            events, flow, _ = engine._stream_dflash_events(
-                tokens, max_tokens=8, prompt_embeddings=embeds, skip_cache_store=True
-            )
-            summary = next(e for e in list(events) if isinstance(e, SummaryEvent))
-            assert list(summary.generated_token_ids) == expected
-            assert summary.cycles_completed > 0
-            assert summary.accepted_from_draft == 0
-            assert not summary.fallback_ar
-            assert flow.snapshot is None and flow.snapshot_service is None
-            engine._native_cache.for_request.assert_not_called()
+            for repeat in range(2 if prefix_cache else 1):
+                if repeat:
+                    engine._close_native_cache()
+                    engine._native_cache = DFlashNativeCache(**native_options)
+                events, flow, _ = engine._stream_dflash_events(
+                    tokens, max_tokens=8, prompt_embeddings=embeds,
+                    vlm_image_hash=f"image-{i}", vlm_cache_key_ranges=[(1, f"image-{i}")],
+                )
+                summary = next(e for e in list(events) if isinstance(e, SummaryEvent))
+                assert list(summary.generated_token_ids) == expected
+                assert summary.cycles_completed > 0
+                assert summary.accepted_from_draft == 0
+                assert not summary.fallback_ar
+                assert flow.hit_tokens == (len(tokens) if repeat else 0)
+            if prefix_cache:
+                continued_base = tokens + expected
+                for new_image in (False, True):
+                    suffix = [7, 120, 8] if new_image else [7, 8]
+                    continued_tokens = continued_base + suffix
+                    continued_ids = mx.array([continued_tokens], dtype=mx.int32)
+                    continued_pixels = mx.concatenate([pixels, 1 - pixels]) if new_image else pixels
+                    continued_grid = mx.concatenate([grid, grid]) if new_image else grid
+                    continued_embeds = target.get_input_embeddings(
+                        continued_ids, continued_pixels, image_grid_thw=continued_grid
+                    ).inputs_embeds
+                    cold_cache = target.language_model.make_cache()
+                    cold = target(
+                        continued_ids, continued_pixels, image_grid_thw=continued_grid,
+                        cache=cold_cache,
+                    ).logits
+                    continued_expected = []
+                    for _ in range(4):
+                        logits = cold[:, -1, :]
+                        logits[:, 127] = -float("inf")
+                        token = int(mx.argmax(logits, axis=-1).item())
+                        continued_expected.append(token)
+                        cold = target(mx.array([[token]]), cache=cold_cache).logits
+                    ranges = [(1, f"image-{i}")]
+                    if new_image:
+                        ranges.append((len(continued_base) + 1, f"images-{i}"))
+                    events, flow, _ = engine._stream_dflash_events(
+                        continued_tokens, max_tokens=4, prompt_embeddings=continued_embeds,
+                        vlm_image_hash=ranges[-1][1], vlm_cache_key_ranges=ranges,
+                    )
+                    summary = next(e for e in list(events) if isinstance(e, SummaryEvent))
+                    assert list(summary.generated_token_ids) == continued_expected
+                    assert len(tokens) <= flow.hit_tokens <= len(continued_base)
+                    continued_base = continued_tokens + continued_expected
     finally:
+        engine._close_native_cache()
         restore_glm5_dflash_class_patches()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streaming", [False, True])
-async def test_glm_image_chat_prepares_vision_without_engine_fallback(monkeypatch, streaming):
+async def test_glm_image_chat_prepares_vision_without_engine_fallback(monkeypatch, tmp_path, streaming):
     import base64
     import io
     from unittest.mock import AsyncMock, MagicMock
@@ -300,6 +346,7 @@ async def test_glm_image_chat_prepares_vision_without_engine_fallback(monkeypatc
     engine._loaded = True
     engine._model_type_str = "glm5_next"
     engine._processor, engine._target_model = processor, target
+    engine._scheduler_config = SimpleNamespace(paged_ssd_cache_dir=tmp_path)
     engine._tokenizer_obj, engine._executor_tokenizer = tokenizer, Tokenizer()
     engine._prefill_guard = MagicMock()
     engine.count_chat_tokens = MagicMock(return_value=7)
@@ -323,9 +370,36 @@ async def test_glm_image_chat_prepares_vision_without_engine_fallback(monkeypatc
     assert kwargs["prompt"] == reference_ids
     assert mx.array_equal(kwargs["prompt_embeddings"], reference_embeds).item()
     assert kwargs["vlm_image_hash"] == reference_hash
+    assert kwargs["vlm_cache_key_ranges"] == [(1, reference_hash)]
     engine._evict_dflash_and_start_fallback.assert_not_called()
     assert not engine._in_fallback_mode
     assert processor.tokenizer is tokenizer
+    encoder = MagicMock(wraps=target.encode_image)
+    monkeypatch.setattr(target, "encode_image", encoder)
+    # A historical image has cached features; only the newly appended image
+    # runs the encoder, and its key leaves the earlier image prefix unchanged.
+    await engine._prepare_chat_prompt(messages, None, {})
+    encoder.assert_not_called()
+    image = io.BytesIO()
+    Image.new("RGB", (8, 4), "red").save(image, format="PNG")
+    next_messages = messages + [{"role": "user", "content": [{
+        "type": "image_url", "image_url": {
+            "url": "data:image/png;base64," + base64.b64encode(image.getvalue()).decode()
+        },
+    }]}]
+    next_kwargs = {}
+    next_ids, next_embeds = await engine._prepare_chat_prompt(next_messages, None, next_kwargs)
+    assert encoder.call_count == 1
+    assert encoder.call_args.args[1].shape[0] == 1
+    assert next_kwargs["vlm_cache_key_ranges"][0] == (1, reference_hash)
+    assert next_kwargs["vlm_cache_key_ranges"][1][1] == next_kwargs["vlm_image_hash"]
+    batch_ids, batch_embeds, _, _, _, _ = vlm._process_chat_messages(next_messages, None, {})
+    assert next_ids == batch_ids
+    assert mx.allclose(next_embeds, batch_embeds, atol=2e-5, rtol=2e-5).item()
+    assert encoder.call_count == 2
+    engine._close_native_cache()
+    await engine._prepare_chat_prompt(next_messages, None, {})
+    assert encoder.call_count == 2  # Both feature entries also survive SSD reload.
     assert await engine.tokenize_chat(messages) == reference_ids
     text_messages = [{"role": "user", "content": "Hello"}]
     if streaming:
@@ -336,6 +410,7 @@ async def test_glm_image_chat_prepares_vision_without_engine_fallback(monkeypatc
         assert engine.generate.call_args.kwargs["prompt_embeddings"] is None
     assert engine._target_model is target
     engine._evict_dflash_and_start_fallback.assert_not_called()
+    engine._close_native_cache()
 
 
 def test_hidden_extraction_maps_target_layer_k_to_capture_k_plus_one():

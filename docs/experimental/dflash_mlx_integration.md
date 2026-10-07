@@ -156,14 +156,16 @@ linear-attention forward from a state snapshot, and DSA layers trim their
 `CacheList(KVCache, PoolingCache)` through the MTP pooling undo log (which
 now covers verify blocks up to 16 tokens, so `dflash_block_size` must stay at
 or below 16). Cold prefill is chunked inside the adapter at the runtime
-`prefill_step_size`. The DFlash L1/L2 prefix cache, DDTree verification,
-verify-linear kernels and target KV quantization are disabled for this target
-until codecs for the composite DSA cache are parity-proven. GLM image requests
+`prefill_step_size`. DDTree verification, verify-linear kernels and target KV
+quantization are disabled for this target. GLM image requests
 use the loaded vision tower and processor to supply merged embeddings to
 DFlash2 prefill, then continue through the same speculative decode loop.
-Image requests bypass prefix-cache reads and writes until image-aware native
-cache keys are supported; they do not trigger an engine switch. The published
-drafter is CC
+The native prefix cache salts blocks from each image's first token with the
+cumulative image hash, preserving earlier context when new images are appended
+and invalidating affected blocks when an image changes. Prefill resumes its
+merged embeddings at the restored token offset. The existing vision-feature
+cache also avoids re-encoding historical images; only uncached images run the
+vision tower. Image requests do not trigger an engine switch. The published drafter is CC
 BY-NC-ND 4.0 and is neither bundled nor downloaded automatically.
 
 ---
@@ -256,10 +258,11 @@ DFlashEngine loads both target and draft models simultaneously:
 - Draft int4 quantization available to reduce footprint
 - The fallback engine is loaded only after DFlash weights are evicted
 
-### 5. Separate prefix cache
+### 5. Prefix cache
 
-DFlashEngine does not use omlx's paged KV block cache. It has a separate
-dflash-mlx snapshot cache: optional L1 memory entries and L2 SSD spill.
+DFlashEngine uses oMLX's native paged prefix cache and SSD storage for target
+state, with drafter-context sidecars. Prompt and generation checkpoints are
+retained so retries and later turns can restore context.
 
 When context fallback is configured, the batched engine provides oMLX's paged
 and SSD block cache after the switch.
