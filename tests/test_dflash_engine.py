@@ -1617,11 +1617,13 @@ class TestDFlashCachedTokensWiring:
             repetition_penalty,
             repetition_context_size,
             skip_cache_store=False,
+            prompt_embeddings=None,
         ):
             assert (temperature, top_p, top_k, min_p) == (0.7, 0.9, 0, 0.0)
             assert repetition_penalty == 1.2
             assert repetition_context_size == 128
             assert not skip_cache_store
+            assert prompt_embeddings is None
             return iter([summary]), fake_flow, [2]
 
         monkeypatch.setattr(engine, "_stream_dflash_events", fake_stream_events)

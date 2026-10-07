@@ -31,7 +31,7 @@ from ..adapter.output_parser import detect_output_parser
 from ..api.tool_calling import convert_tools_for_template
 from ..api.utils import clean_special_tokens, detect_and_strip_partial
 from ..cache.observability import CacheRateTracker
-from ..exceptions import PrefillMemoryAbortedError
+from ..exceptions import InvalidRequestError, PrefillMemoryAbortedError
 from ..memory_monitor import (
     MemoryMonitor,
     raise_if_prefill_exceeds,
@@ -384,6 +384,7 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
         self._draft_backend = None
         self._tokenizer_obj = None
         self._executor_tokenizer = None
+        self._processor = None
         self._loaded = False
         # DFlash runs outside Scheduler, so memory-pressure aborts cannot use
         # EngineCore's request registry. Keep the stop events for every
@@ -824,6 +825,7 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
         self._tokenizer_obj = target_bundle.tokenizer
         self._target_ops = target_bundle.target_ops
         target_meta = target_bundle.meta
+        self._processor = target_meta.get("processor")
 
         def initialize_cache():
             from ..cache.dflash import DFlashNativeCache, install_native_cache_hooks
@@ -1051,6 +1053,7 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
         self._draft_model = None
         self._draft_backend = None
         self._executor_tokenizer = None
+        self._processor = None
         self._output_parser_factory = None
         # Deliberately keep self._prefill_guard alive across the transition.
         # Its MemoryMonitor holds only dims (no model ref), so it stays valid
@@ -1138,6 +1141,7 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
         self._draft_backend = None
         self._tokenizer_obj = None
         self._executor_tokenizer = None
+        self._processor = None
         self._output_parser_factory = None
         self._prefill_guard = None
         self._in_fallback_mode = False
@@ -1160,6 +1164,7 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
         chat_template_kwargs: dict[str, Any] | None = None,
         is_partial: bool | None = None,
         add_generation_prompt: bool | None = None,
+        template_target: Any | None = None,
     ) -> str:
         """Apply chat template to messages.
 
@@ -1175,7 +1180,9 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
                 compatibility with direct engine callers.
             add_generation_prompt: Overrides the partial-derived default.
         """
-        if hasattr(self._tokenizer_obj, "apply_chat_template"):
+        if template_target is None:
+            template_target = self._tokenizer_obj
+        if hasattr(template_target, "apply_chat_template"):
             if is_partial is None:
                 is_partial = detect_and_strip_partial(messages)
             else:
@@ -1199,7 +1206,7 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
                 template_kwargs.update(chat_template_kwargs)
             try:
                 return apply_chat_template_with_reasoning_effort_fallback(
-                    self._tokenizer_obj,
+                    template_target,
                     messages,
                     template_kwargs,
                     is_harmony=self.model_type == "gpt_oss",
@@ -1210,7 +1217,7 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
                         template_kwargs.pop(key, None)
                 template_kwargs.pop("tools", None)
                 template_kwargs.pop("enable_thinking", None)
-                return self._tokenizer_obj.apply_chat_template(
+                return template_target.apply_chat_template(
                     messages, **template_kwargs
                 )
         else:
@@ -1264,6 +1271,17 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
                 add_generation_prompt=add_generation_prompt,
                 add_special_tokens=add_special_tokens,
             )
+        if self._processor is not None and self._has_multimodal_content(messages):
+            kwargs = {
+                "chat_template_kwargs": chat_template_kwargs,
+                "is_partial": is_partial,
+                "add_generation_prompt": add_generation_prompt,
+                "add_special_tokens": add_special_tokens,
+            }
+            prompt, _ = await self._prepare_chat_prompt(
+                messages, tools, kwargs, encode_vision=False
+            )
+            return prompt
         return self._encode_chat_prompt(
             messages,
             tools,
@@ -1324,6 +1342,18 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
                 self, "preflight_chat", "primary-mode prefill guard unavailable"
             )
             return
+        image_tokens = 0
+        if self._processor is not None and self._has_multimodal_content(messages):
+            from ..utils.image import extract_images_from_messages
+            from .vlm import _count_image_tokens_real, _derive_image_token_upper_bound
+
+            messages, images, _ = extract_images_from_messages(messages)
+            image_tokens = _count_image_tokens_real(
+                messages,
+                self._processor,
+                images=images,
+                upper_bound=_derive_image_token_upper_bound(self._processor),
+            )
         try:
             num_tokens = self.count_chat_tokens(
                 messages,
@@ -1345,7 +1375,7 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
         # paged cache. Subtracting hit tokens here would under-count and
         # defeat the OOM guard.
         self._prefill_guard.preflight_or_raise(
-            num_prompt_tokens=num_tokens, request_id=request_id
+            num_prompt_tokens=num_tokens + image_tokens, request_id=request_id
         )
 
     async def preflight_completion(
@@ -1481,6 +1511,7 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
         repetition_penalty: float = 1.0,
         repetition_context_size: int = 20,
         skip_cache_store: bool = False,
+        prompt_embeddings: mx.array | None = None,
     ):
         """Build the dflash event iterator with prefix cache plumbed in."""
         from dflash_mlx.runtime import stream_dflash_generate
@@ -1507,15 +1538,32 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
 
         from ..cache.dflash import NativeCacheTargetOps
 
-        prefix_flow = (self._native_cache.for_request if self._native_cache else PrefixCacheFlow.for_request)(
-            model_provider=_ModelProviderShim(),
-            draft_model=self._draft_model,
-            tokenizer=self._executor_tokenizer,
-            prompt=prompt_tokens,
-            max_new_tokens=max_tokens,
-            runtime_context=self._runtime_context,
-        )
-        if skip_cache_store:
+        if prompt_embeddings is not None:
+            if (
+                prompt_embeddings.ndim != 3
+                or prompt_embeddings.shape[:2] != (1, len(prompt_tokens))
+            ):
+                raise ValueError("DFlash prompt embeddings must match prompt token IDs")
+            # Token-only prefix keys alias different images. Bypass reads and
+            # writes until the native cache supports image-aware identities.
+            prefix_flow = PrefixCacheFlow(
+                cache_manager=None, publish_generation_snapshot=False
+            )
+            target_ops = self._target_ops.with_prompt_embeddings(prompt_embeddings)
+        else:
+            prefix_flow = (self._native_cache.for_request if self._native_cache else PrefixCacheFlow.for_request)(
+                model_provider=_ModelProviderShim(),
+                draft_model=self._draft_model,
+                tokenizer=self._executor_tokenizer,
+                prompt=prompt_tokens,
+                max_new_tokens=max_tokens,
+                runtime_context=self._runtime_context,
+            )
+            target_ops = (
+                NativeCacheTargetOps(self._target_ops)
+                if self._native_cache else self._target_ops
+            )
+        if skip_cache_store and prefix_flow.snapshot_service is not None:
             if self._native_cache:
                 prefix_flow.snapshot_service.active = False
             else:
@@ -1523,7 +1571,7 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
 
         event_iter = stream_dflash_generate(
             target_model=self._target_model,
-            target_ops=NativeCacheTargetOps(self._target_ops) if self._native_cache else self._target_ops,
+            target_ops=target_ops,
             tokenizer=self._executor_tokenizer,
             draft_model=self._draft_model,
             draft_backend=self._draft_backend,
@@ -1559,7 +1607,10 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
                 for event in event_iter:
                     if isinstance(event, PrefillCompleteEvent):
                         restored = max(0, event.prefill_tokens_restored)
-                        if self._native_cache is not None:
+                        if (
+                            self._native_cache is not None
+                            and prefix_flow.cache_manager is self._native_cache
+                        ):
                             cache = self._native_cache
                             cache._tokens_saved += restored - prefix_flow.hit_tokens
                             cache._hits += int(restored > 0) - int(prefix_flow.hit_tokens > 0)
@@ -1631,6 +1682,7 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
         loop: asyncio.AbstractEventLoop,
         stop_event: threading.Event,
         skip_cache_store: bool = False,
+        prompt_embeddings: mx.array | None = None,
     ) -> None:
         """Run dflash generation with streaming on MLX executor thread.
 
@@ -1658,7 +1710,9 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
                 repetition_penalty=repetition_penalty,
                 repetition_context_size=repetition_context_size,
                 skip_cache_store=skip_cache_store,
+                prompt_embeddings=prompt_embeddings,
             )
+            prompt_embeddings = None
             self._record_prefill_guard_active_memory()
 
             # Protocol-specific parser (gemma4 channel markers → <think> tags,
@@ -1811,6 +1865,7 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
         repetition_penalty: float = 1.0,
         presence_penalty: float = 0.0,
         stop: list[str] | None = None,
+        prompt_embeddings: mx.array | None = None,
         **kwargs,
     ) -> GenerationOutput:
         if not self._loaded:
@@ -1837,6 +1892,7 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
                 repetition_penalty=repetition_penalty,
                 presence_penalty=presence_penalty,
                 stop=stop,
+                vlm_inputs_embeds=prompt_embeddings,
                 **kwargs,
             )
 
@@ -1853,6 +1909,7 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
                 repetition_penalty=repetition_penalty,
                 presence_penalty=presence_penalty,
                 stop=stop,
+                vlm_inputs_embeds=prompt_embeddings,
                 **kwargs,
             )
 
@@ -1871,6 +1928,7 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
         activity_id = self._begin_activity("generate", detail="generating")
 
         def _run():
+            nonlocal prompt_embeddings
             from dflash_mlx.engine.events import SummaryEvent, TokenEvent
 
             event_iter = None
@@ -1894,7 +1952,9 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
                     repetition_penalty=repetition_penalty,
                     repetition_context_size=int(repetition_context_size),
                     skip_cache_store=skip_cache_store,
+                    prompt_embeddings=prompt_embeddings,
                 )
+                prompt_embeddings = None
                 self._record_prefill_guard_active_memory()
                 tokens: list[int] = []
                 parsed_visible_parts: list[str] = []
@@ -2049,6 +2109,7 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
         repetition_penalty: float = 1.0,
         presence_penalty: float = 0.0,
         stop: list[str] | None = None,
+        prompt_embeddings: mx.array | None = None,
         **kwargs,
     ) -> AsyncIterator[GenerationOutput]:
         if not self._loaded:
@@ -2075,6 +2136,7 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
                 repetition_penalty=repetition_penalty,
                 presence_penalty=presence_penalty,
                 stop=stop,
+                vlm_inputs_embeds=prompt_embeddings,
                 **kwargs,
             ):
                 yield output
@@ -2092,6 +2154,7 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
                 repetition_penalty=repetition_penalty,
                 presence_penalty=presence_penalty,
                 stop=stop,
+                vlm_inputs_embeds=prompt_embeddings,
                 **kwargs,
             ):
                 yield output
@@ -2146,7 +2209,9 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
                 loop,
                 stop_event,
                 skip_cache_store=skip_cache_store,
+                prompt_embeddings=prompt_embeddings,
             )
+            prompt_embeddings = None
         except Exception:
             self._unregister_stop_event(stop_event)
             self._end_activity(activity_id)
@@ -2227,6 +2292,105 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
             except Exception as exc:
                 logger.debug(f"DFlash executor future raised: {exc}")
 
+    def _prepare_multimodal_prompt(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict] | None,
+        chat_template_kwargs: dict[str, Any] | None,
+        is_partial: bool | None,
+        *,
+        encode_vision: bool = True,
+        add_generation_prompt: bool | None = None,
+        add_special_tokens: bool | None = None,
+    ) -> tuple[list[int], mx.array | None, str | None]:
+        """Prepare GLM vision input on the same MLX thread as generation."""
+        from mlx_vlm.utils import prepare_inputs
+
+        from ..utils.image import compute_image_hash, extract_images_from_messages
+        from .vlm import VLMBatchedEngine
+
+        _, images, audio = extract_images_from_messages(messages)
+        if audio:
+            raise InvalidRequestError(
+                "GLM-5.3 DFlash does not support audio input.", field="messages"
+            )
+        if not images or self._target_model.vision_model is None:
+            raise InvalidRequestError(
+                "This GLM-5.3 request requires a vision model and image data.",
+                field="messages",
+            )
+        if is_partial is None:
+            is_partial = detect_and_strip_partial(messages)
+        formatted, _ = VLMBatchedEngine.format_messages_for_model(
+            messages, len(images), self.model_type
+        )
+        # HF tokenizers cannot encode concurrently across the event loop and
+        # executor. Keep the processor on the executor's tokenizer copy.
+        processor = copy.copy(self._processor)
+        processor.tokenizer = self._executor_tokenizer
+        prompt = self._apply_chat_template(
+            formatted,
+            convert_tools_for_template(tools) if tools else None,
+            chat_template_kwargs=chat_template_kwargs,
+            is_partial=is_partial,
+            add_generation_prompt=add_generation_prompt,
+            template_target=processor,
+        )
+        image_token = getattr(processor, "image_token", None)
+        if isinstance(image_token, str) and image_token and image_token not in prompt:
+            raise InvalidRequestError(
+                "The chat template did not emit image tokens for the attached images.",
+                field="messages",
+            )
+        inputs = prepare_inputs(
+            processor,
+            images=images,
+            prompts=[prompt],
+            add_special_tokens=False if add_special_tokens is None else add_special_tokens,
+        )
+        input_ids = inputs["input_ids"]
+        embeddings = None
+        if encode_vision:
+            features = self._target_model.get_input_embeddings(**inputs)
+            embeddings = features.inputs_embeds
+            mx.eval(embeddings)
+        image_hash = compute_image_hash(images) if encode_vision else None
+        return input_ids[0].tolist(), embeddings, image_hash
+
+    async def _prepare_chat_prompt(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict] | None,
+        kwargs: dict[str, Any],
+        *,
+        encode_vision: bool = True,
+    ) -> tuple[str | list[int], mx.array | None]:
+        ct_kwargs = kwargs.pop("chat_template_kwargs", None)
+        is_partial = kwargs.pop("is_partial", None)
+        if self._processor is not None and self._has_multimodal_content(messages):
+            from ..engine_core import get_mlx_executor
+
+            add_generation_prompt = kwargs.pop("add_generation_prompt", None)
+            add_special_tokens = kwargs.pop("add_special_tokens", None)
+            prompt, embeddings, image_hash = await asyncio.get_running_loop().run_in_executor(
+                get_mlx_executor(),
+                lambda: self._prepare_multimodal_prompt(
+                    messages, tools, ct_kwargs, is_partial,
+                    encode_vision=encode_vision,
+                    add_generation_prompt=add_generation_prompt,
+                    add_special_tokens=add_special_tokens,
+                ),
+            )
+            kwargs["vlm_image_hash"] = image_hash
+            return prompt, embeddings
+        prompt = self._apply_chat_template(
+            messages,
+            convert_tools_for_template(tools) if tools else None,
+            chat_template_kwargs=ct_kwargs,
+            is_partial=is_partial,
+        )
+        return prompt, None
+
     async def chat(
         self,
         messages: list[dict[str, Any]],
@@ -2257,8 +2421,10 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
                 **kwargs,
             )
 
-        if self._fallback_engine_type == "vlm" and self._has_multimodal_content(
-            messages
+        if (
+            self._processor is None
+            and self._fallback_engine_type == "vlm"
+            and self._has_multimodal_content(messages)
         ):
             async with self._fallback_lock:
                 if not self._in_fallback_mode:
@@ -2280,15 +2446,7 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
                 **kwargs,
             )
 
-        template_tools = convert_tools_for_template(tools) if tools else None
-        ct_kwargs = kwargs.pop("chat_template_kwargs", None)
-        is_partial = kwargs.pop("is_partial", None)
-        prompt = self._apply_chat_template(
-            messages,
-            template_tools,
-            chat_template_kwargs=ct_kwargs,
-            is_partial=is_partial,
-        )
+        prompt, prompt_embeddings = await self._prepare_chat_prompt(messages, tools, kwargs)
 
         return await self.generate(
             prompt=prompt,
@@ -2300,6 +2458,7 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
             repetition_penalty=repetition_penalty,
             presence_penalty=presence_penalty,
             tools=tools,
+            prompt_embeddings=prompt_embeddings,
             **kwargs,
         )
 
@@ -2335,8 +2494,10 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
                 yield output
             return
 
-        if self._fallback_engine_type == "vlm" and self._has_multimodal_content(
-            messages
+        if (
+            self._processor is None
+            and self._fallback_engine_type == "vlm"
+            and self._has_multimodal_content(messages)
         ):
             async with self._fallback_lock:
                 if not self._in_fallback_mode:
@@ -2360,15 +2521,7 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
                 yield output
             return
 
-        template_tools = convert_tools_for_template(tools) if tools else None
-        ct_kwargs = kwargs.pop("chat_template_kwargs", None)
-        is_partial = kwargs.pop("is_partial", None)
-        prompt = self._apply_chat_template(
-            messages,
-            template_tools,
-            chat_template_kwargs=ct_kwargs,
-            is_partial=is_partial,
-        )
+        prompt, prompt_embeddings = await self._prepare_chat_prompt(messages, tools, kwargs)
 
         async for output in self.stream_generate(
             prompt=prompt,
@@ -2380,6 +2533,7 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
             repetition_penalty=repetition_penalty,
             presence_penalty=presence_penalty,
             tools=tools,
+            prompt_embeddings=prompt_embeddings,
             **kwargs,
         ):
             yield output

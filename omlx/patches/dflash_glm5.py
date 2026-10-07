@@ -39,6 +39,7 @@ stock dflash-mlx snapshot codec does not support GLM's composite cache.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import time
@@ -277,6 +278,13 @@ class Glm5NextTargetOps:
     # layer in flight) above this width to bound prefill memory.
     pipeline_min_tokens = 256
 
+    def with_prompt_embeddings(self, embeddings: mx.array) -> Glm5NextTargetOps:
+        """Bind vision prefill to this request without mutating shared target ops."""
+        ops = copy.copy(self)
+        ops._prompt_embeddings = embeddings
+        ops._prompt_offset = 0
+        return ops
+
     def model_type(self, target_model: Any) -> str:
         return _model_type(target_model)
 
@@ -385,6 +393,15 @@ class Glm5NextTargetOps:
         capture_layer_ids: set[int] | None = None,
         logits_last_only: bool = False,
     ) -> tuple[mx.array, list[mx.array] | dict[int, mx.array]]:
+        prompt_embeddings = getattr(self, "_prompt_embeddings", None)
+        if input_embeddings is None and prompt_embeddings is not None:
+            end = self._prompt_offset + int(input_ids.shape[1])
+            if end > prompt_embeddings.shape[1]:
+                raise ValueError("GLM-5.3 prompt embeddings/token length mismatch")
+            input_embeddings = prompt_embeddings[:, self._prompt_offset:end]
+            self._prompt_offset = end
+            if end == prompt_embeddings.shape[1]:
+                self._prompt_embeddings = None
         inner = self.text_model(target_model)
         h = (
             input_embeddings
@@ -791,6 +808,7 @@ def load_glm5_target_bundle(
         model=model,
         tokenizer=tokenizer,
         meta={
+            "processor": processor,
             "resolved_model_ref": str(model_path),
             "config": config,
             "quantize_kv_cache": False,

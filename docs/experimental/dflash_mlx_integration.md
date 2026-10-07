@@ -158,8 +158,12 @@ now covers verify blocks up to 16 tokens, so `dflash_block_size` must stay at
 or below 16). Cold prefill is chunked inside the adapter at the runtime
 `prefill_step_size`. The DFlash L1/L2 prefix cache, DDTree verification,
 verify-linear kernels and target KV quantization are disabled for this target
-until codecs for the composite DSA cache are parity-proven; image requests
-still take the evict-and-VLM-fallback path. The published drafter is CC
+until codecs for the composite DSA cache are parity-proven. GLM image requests
+use the loaded vision tower and processor to supply merged embeddings to
+DFlash2 prefill, then continue through the same speculative decode loop.
+Image requests bypass prefix-cache reads and writes until image-aware native
+cache keys are supported; they do not trigger an engine switch. The published
+drafter is CC
 BY-NC-ND 4.0 and is neither bundled nor downloaded automatically.
 
 ---

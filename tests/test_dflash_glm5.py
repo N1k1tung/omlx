@@ -132,6 +132,212 @@ def test_mhc_capture_contract_is_the_stream_mean():
         _contract_mhc_hidden(mx.zeros((2, 6)))
 
 
+def test_image_prefill_and_rejected_dflash2_drafts_match_vlm(monkeypatch):
+    """Vision conditioning survives chunked prefill and repeated rollback."""
+    from unittest.mock import MagicMock
+
+    from dflash_mlx.draft_backend import EagerDraftBackend
+    from dflash_mlx.engine.events import SummaryEvent
+    from dflash_mlx.model import DFlash2DraftModel, DFlashDraftModelArgs
+    from dflash_mlx.runtime.context import build_offline_runtime_context
+
+    from omlx.engine.dflash import DFlashEngine
+    from omlx.patches.dflash_glm5 import (
+        Glm5NextTargetOps,
+        restore_glm5_dflash_class_patches,
+    )
+    from omlx.patches.mlx_vlm_glm5_next_compat import (
+        apply_mlx_vlm_glm5_next_compat_patch,
+    )
+    from tests.test_mlx_vlm_glm5_next_compat import _tiny_config
+
+    apply_mlx_vlm_glm5_next_compat_patch()
+    from mlx_vlm.models import glm5_next
+
+    mx.random.seed(31)
+    target = glm5_next.Model(_tiny_config(with_vision=True))
+    ops = Glm5NextTargetOps()
+    ops.prefill_chunk_size = 4
+    draft = DFlash2DraftModel(DFlashDraftModelArgs(
+        model_type="dflash2", hidden_size=32, num_hidden_layers=1,
+        intermediate_size=64, num_attention_heads=2, num_key_value_heads=2,
+        rms_norm_eps=1e-5, vocab_size=128, max_position_embeddings=128,
+        rope_theta=10000, head_dim=16, tie_word_embeddings=False,
+        num_target_layers=2, block_size=4,
+        dflash_config={
+            "target_layer_ids": [0, 1], "selector_top_k": 4, "selector_rank": 8,
+            "conv_kernel_size": 2, "conv_group_size": 16,
+        },
+    ))
+    draft.bind_target_model(target, target_ops=ops)
+    # Force every draft to a suppressed token, exercising exact rejection.
+    monkeypatch.setattr(draft, "select_candidates", lambda hidden, logits, anchor_ids: (
+        mx.full(hidden.shape[:2], 127, dtype=mx.int32), None, None
+    ))
+    engine = DFlashEngine("tiny-glm", "tiny-draft", fallback_engine_type="vlm")
+    engine._loaded = True
+    engine._target_model = target
+    engine._target_ops = ops
+    engine._draft_model = draft
+    engine._draft_backend = EagerDraftBackend()
+    engine._executor_tokenizer = SimpleNamespace(eos_token_ids=[], eos_token_id=None)
+    engine._generation_config_eos = set()
+    engine._suppress_token_ids = {127}
+    engine._block_size = 4
+    engine._runtime_context = build_offline_runtime_context(
+        verify_mode="dflash", copyspec_mode="off", draft_sink_size=0, draft_window_size=16
+    )
+    engine._native_cache = MagicMock()
+    tokens = [1, 120, 2, 3, 4, 5]
+    ids = mx.array([tokens], dtype=mx.int32)
+    grid = mx.array([[1, 2, 2]], dtype=mx.int32)
+    ops.install_speculative_hooks(target)
+    try:
+        for pixels in (mx.zeros((4, 24)), mx.ones((4, 24))):
+            embeds = target.get_input_embeddings(ids, pixels, image_grid_thw=grid).inputs_embeds
+            reference_cache = target.language_model.make_cache()
+            reference = target(ids, pixels, image_grid_thw=grid, cache=reference_cache).logits
+            request_ops = ops.with_prompt_embeddings(embeds)
+            actual, captured = request_ops.forward_with_hidden_capture(
+                target, input_ids=ids,
+                cache=request_ops.make_cache(target, enable_speculative_linear_cache=True),
+                capture_layer_ids={0, 1, 2},
+            )
+            mx.eval(actual, reference, captured[0])
+            assert mx.allclose(actual, reference, atol=2e-5, rtol=2e-5).item()
+            assert mx.array_equal(captured[0], embeds).item()
+            assert request_ops._prompt_embeddings is None
+            assert not hasattr(ops, "_prompt_embeddings")
+
+            expected = []
+            for _ in range(8):
+                logits = reference[:, -1, :]
+                logits[:, 127] = -float("inf")
+                token = int(mx.argmax(logits, axis=-1).item())
+                expected.append(token)
+                reference = target(mx.array([[token]]), cache=reference_cache).logits
+            events, flow, _ = engine._stream_dflash_events(
+                tokens, max_tokens=8, prompt_embeddings=embeds, skip_cache_store=True
+            )
+            summary = next(e for e in list(events) if isinstance(e, SummaryEvent))
+            assert list(summary.generated_token_ids) == expected
+            assert summary.cycles_completed > 0
+            assert summary.accepted_from_draft == 0
+            assert not summary.fallback_ar
+            assert flow.snapshot is None and flow.snapshot_service is None
+            engine._native_cache.for_request.assert_not_called()
+    finally:
+        restore_glm5_dflash_class_patches()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_glm_image_chat_prepares_vision_without_engine_fallback(monkeypatch, streaming):
+    import base64
+    import io
+    from unittest.mock import AsyncMock, MagicMock
+
+    from PIL import Image
+
+    from omlx.engine.dflash import DFlashEngine
+    from omlx.engine.vlm import VLMBatchedEngine
+    from omlx.patches.mlx_vlm_glm5_next_compat import (
+        apply_mlx_vlm_glm5_next_compat_patch,
+    )
+    from tests.test_mlx_vlm_glm5_next_compat import _tiny_config
+
+    apply_mlx_vlm_glm5_next_compat_patch()
+    from mlx_vlm.models import glm5_next
+
+    class Tokenizer:
+        model_input_names = ["input_ids", "attention_mask"]
+        pad_token = "[PAD]"
+        eos_token = "[EOS]"
+        pad_token_id = 0
+
+        @staticmethod
+        def convert_tokens_to_ids(token):
+            return {"<|image|>": 120, "<|video|>": 121}[token]
+
+        @staticmethod
+        def __call__(texts, **kwargs):
+            rows = [[1] + [120] * text.count("<|image|>") + [2] for text in texts]
+            return {"input_ids": rows, "attention_mask": [[1] * len(row) for row in rows]}
+
+        @staticmethod
+        def apply_chat_template(messages, **kwargs):
+            return "".join(
+                "<|image|>" if isinstance(part, dict) and part.get("type") == "image" else str(part)
+                for msg in messages
+                for part in (msg["content"] if isinstance(msg["content"], list) else [msg["content"]])
+            )
+
+    tokenizer = Tokenizer()
+    processor = glm5_next.Glm5NextProcessor(
+        image_processor=glm5_next.Glm5NextImageProcessor(
+            patch_size=2, temporal_patch_size=2, merge_size=2,
+            min_image_tokens=1, max_image_tokens=4,
+        ),
+        tokenizer=tokenizer,
+    )
+    target = glm5_next.Model(_tiny_config(with_vision=True))
+    image = io.BytesIO()
+    Image.new("RGB", (8, 4), "blue").save(image, format="PNG")
+    image_url = "data:image/png;base64," + base64.b64encode(image.getvalue()).decode()
+    messages = [
+        {"role": "user", "content": [
+            {"type": "text", "text": "Describe"},
+            {"type": "image_url", "image_url": {"url": image_url}},
+        ]},
+        {"role": "assistant", "content": "An image."},
+        {"role": "user", "content": "What color?"},
+    ]
+    vlm = VLMBatchedEngine("tiny-glm")
+    vlm._vlm_model, vlm._processor, vlm._tokenizer = target, processor, tokenizer
+    vlm._vision_cache_enabled = False
+    reference_ids, reference_embeds, _, reference_hash, _, _ = vlm._process_chat_messages(messages, None, {})
+    engine = DFlashEngine("tiny-glm", "tiny-draft", fallback_engine_type="vlm")
+    engine._loaded = True
+    engine._model_type_str = "glm5_next"
+    engine._processor, engine._target_model = processor, target
+    engine._tokenizer_obj, engine._executor_tokenizer = tokenizer, Tokenizer()
+    engine._prefill_guard = MagicMock()
+    engine.count_chat_tokens = MagicMock(return_value=7)
+    await engine.preflight_chat(messages)
+    engine._prefill_guard.preflight_or_raise.assert_called_once_with(
+        num_prompt_tokens=9, request_id=None
+    )
+    engine._evict_dflash_and_start_fallback = AsyncMock()
+    output = object()
+    if streaming:
+        async def generate(**kwargs):
+            engine.generate_kwargs = kwargs
+            yield output
+        monkeypatch.setattr(engine, "stream_generate", generate)
+        assert [item async for item in engine.stream_chat(messages)] == [output]
+        kwargs = engine.generate_kwargs
+    else:
+        engine.generate = AsyncMock(return_value=output)
+        assert await engine.chat(messages) is output
+        kwargs = engine.generate.call_args.kwargs
+    assert kwargs["prompt"] == reference_ids
+    assert mx.array_equal(kwargs["prompt_embeddings"], reference_embeds).item()
+    assert kwargs["vlm_image_hash"] == reference_hash
+    engine._evict_dflash_and_start_fallback.assert_not_called()
+    assert not engine._in_fallback_mode
+    assert processor.tokenizer is tokenizer
+    assert await engine.tokenize_chat(messages) == reference_ids
+    text_messages = [{"role": "user", "content": "Hello"}]
+    if streaming:
+        assert [item async for item in engine.stream_chat(text_messages)] == [output]
+        assert engine.generate_kwargs["prompt_embeddings"] is None
+    else:
+        assert await engine.chat(text_messages) is output
+        assert engine.generate.call_args.kwargs["prompt_embeddings"] is None
+    assert engine._target_model is target
+    engine._evict_dflash_and_start_fallback.assert_not_called()
+
+
 def test_hidden_extraction_maps_target_layer_k_to_capture_k_plus_one():
     from omlx.patches.dflash_glm5 import Glm5NextTargetOps
 
@@ -797,6 +1003,7 @@ def test_glm_target_loader_prefers_omlx_custom_vlm_loader(tmp_path, monkeypatch)
     bundle = load_glm5_target_bundle(tmp_path)
     assert bundle.model is target
     assert bundle.tokenizer is processor.tokenizer
+    assert bundle.meta["processor"] is processor
     assert bundle.meta["config"] == {"model_type": "glm5_next"}
     assert bundle.meta["verify_linear_enabled"] is False
     assert bundle.target_ops.backend_name == "glm5_next"

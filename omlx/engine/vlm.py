@@ -3131,11 +3131,24 @@ class VLMBatchedEngine(BaseEngine):
         num_videos: int = 0,
     ) -> tuple[list[dict[str, Any]], list[tuple[int, int]]]:
         """Format VLM messages with image/audio/video tokens on media-bearing user turns."""
-        from mlx_vlm.prompt_utils import extract_text_from_content, get_message_json
-
         model_type = self.model_type or getattr(
             self._vlm_model.config, "model_type", ""
         )
+        return self.format_messages_for_model(
+            messages, num_images, model_type, num_audios, num_videos
+        )
+
+    @staticmethod
+    def format_messages_for_model(
+        messages: list[dict[str, Any]],
+        num_images: int,
+        model_type: str,
+        num_audios: int = 0,
+        num_videos: int = 0,
+    ) -> tuple[list[dict[str, Any]], list[tuple[int, int]]]:
+        """Share media formatting with engines that prefill through target ops."""
+        from mlx_vlm.prompt_utils import extract_text_from_content, get_message_json
+
         if not model_type:
             raise ValueError("Missing VLM model_type for chat template formatting")
 
@@ -3152,13 +3165,17 @@ class VLMBatchedEngine(BaseEngine):
         remaining_videos = num_videos
         has_explicit_images = any(
             isinstance(msg, dict)
-            and self._count_content_parts(msg.get("content"), image_part_types) > 0
+            and VLMBatchedEngine._count_content_parts(
+                msg.get("content"), image_part_types
+            ) > 0
             for msg in messages
         )
 
         has_explicit_audio = any(
             isinstance(msg, dict)
-            and self._count_content_parts(msg.get("content"), audio_part_types) > 0
+            and VLMBatchedEngine._count_content_parts(
+                msg.get("content"), audio_part_types
+            ) > 0
             for msg in messages
         )
 
@@ -3182,15 +3199,17 @@ class VLMBatchedEngine(BaseEngine):
             msg_num_videos = 0
             if role == "user" and remaining_videos > 0:
                 msg_num_videos = min(
-                    self._count_content_parts(raw_content, video_part_types),
+                    VLMBatchedEngine._count_content_parts(
+                        raw_content, video_part_types
+                    ),
                     remaining_videos,
                 )
                 remaining_videos -= msg_num_videos
             if role == "user":
-                explicit_images = self._count_content_parts(
+                explicit_images = VLMBatchedEngine._count_content_parts(
                     raw_content, image_part_types
                 )
-                explicit_audios = self._count_content_parts(
+                explicit_audios = VLMBatchedEngine._count_content_parts(
                     raw_content, audio_part_types
                 )
                 if explicit_images > 0 and remaining_images > 0:

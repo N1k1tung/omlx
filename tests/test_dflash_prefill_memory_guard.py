@@ -371,6 +371,7 @@ def _bare_engine() -> DFlashEngine:
     eng._loaded = True
     eng._in_fallback_mode = False
     eng._fallback_engine = None
+    eng._processor = None
     eng._prefill_guard = None
     return eng
 
