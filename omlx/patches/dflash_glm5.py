@@ -114,6 +114,8 @@ def _glm_linear_forward() -> Any:
 
 def _contract_mhc_hidden(hidden: mx.array) -> mx.array:
     """Contract GLM's ``[B, T, hc_mult, H]`` residual streams for DFlash."""
+    if hasattr(hidden, "materialize"):
+        hidden = hidden.materialize()
     if hidden.ndim == 4:
         return hidden.mean(axis=2)
     if hidden.ndim != 3:
@@ -479,9 +481,20 @@ class Glm5NextTargetOps:
             zip(inner.layers, cache, strict=True)
         ):
             mask = ssm_mask if getattr(layer, "is_linear", False) else fa_mask
-            h = layer(h, mask=mask, cache=layer_cache)
+            if defer:
+                h = layer(
+                    h, mask=mask, cache=layer_cache, defer=layer_index + 1 < n_layers
+                )
+            else:
+                h = layer(h, mask=mask, cache=layer_cache)
             if pipeline is not None:
                 pipeline.push(h)
+            elif (
+                eval_every
+                and (layer_index + 1) % eval_every == 0
+                and layer_index + 1 < n_layers
+            ):
+                mx.async_eval(h.arrays() if isinstance(h, _HCDeferred) else h)
             capture_key = layer_index + 1
             if capture_all:
                 captured.append(_contract_mhc_hidden(h))
