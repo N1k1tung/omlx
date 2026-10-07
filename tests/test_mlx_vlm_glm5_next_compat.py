@@ -3862,7 +3862,7 @@ def _check_small_model(seed=41, prompt_len=2101, heads=16, quantize_mla=False):
     before = dict(_stats())
     saved = language._DECODE_FUSION
     try:
-        for step, width in enumerate([1, 1, 4, 1, 7, 2, 1, 8, 3]):
+        for step, width in enumerate([1, 1, 4, 1, 7, 2, 1, 8, 3, 4, 8]):
             block = mx.concatenate(
                 [next_ids, (next_ids + mx.arange(1, width)[None]) % 256], axis=1
             )[:, :width]
@@ -4448,8 +4448,9 @@ def test_upstream_kda_prefill_then_fused_decode_is_bitwise_reference(monkeypatch
 
 @pytest.mark.usefixtures("glm5_fused_decode")
 @pytest.mark.parametrize("every", [1, 3])
-def test_decode_early_eval_only_schedules(every, monkeypatch):
-    """One-token decode forwards evaluate every few layers while the graph is
+@pytest.mark.parametrize("width", [1, 2, 4, 8])
+def test_decode_early_eval_only_schedules(every, width, monkeypatch):
+    """Decode/verify forwards evaluate every few layers while the graph is
     still being built; the logits and caches are those of the lazy forward."""
     language = _language()
     model = _fused_shape_model(seed=45)
@@ -4466,7 +4467,7 @@ def test_decode_early_eval_only_schedules(every, monkeypatch):
         calls.append(len(args))
         return real_async_eval(*args)
 
-    token = mx.array([[17]], dtype=mx.int32)
+    token = mx.arange(17, 17 + width, dtype=mx.int32)[None]
     for step in range(3):
         monkeypatch.setattr(language, "_DECODE_EVAL_EVERY", 0)
         lazy = model(token, cache=caches[0]).logits
@@ -4477,7 +4478,7 @@ def test_decode_early_eval_only_schedules(every, monkeypatch):
         monkeypatch.setattr(mx, "async_eval", real_async_eval)
         mx.eval(early)
         assert _mismatches(early, lazy) == 0, f"step {step}"
-        token = mx.argmax(lazy[:, -1:], axis=-1).astype(mx.int32)
+        token = mx.argmax(lazy, axis=-1).astype(mx.int32)
     # 4 layers: evaluations after layers `every`, 2 * every, ... (not the last).
     assert len(calls) == 3 * len(range(every, 4, every))
     for a, b in zip(caches[0], caches[1]):

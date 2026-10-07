@@ -446,6 +446,11 @@ class Glm5NextTargetOps:
         """One target forward over ``h`` mirroring ``Glm5NextModel.__call__``."""
         from mlx_vlm.models.base import create_attention_mask, create_ssm_mask
 
+        from .mlx_vlm_glm5_next_compat import apply_mlx_vlm_glm5_next_compat_patch
+
+        apply_mlx_vlm_glm5_next_compat_patch()
+        from mlx_vlm.models.glm5_next.language import _DECODE_BLOCK, _DECODE_EVAL_EVERY, _HCDeferred
+
         fa_cache = cache[inner.fa_idx]
         fa_mask = create_attention_mask(
             h,
@@ -477,6 +482,12 @@ class Glm5NextTargetOps:
             if int(h.shape[1]) >= int(self.pipeline_min_tokens)
             else None
         )
+        # Preserve normal one-token GLM decode scheduling while capturing only
+        # the requested layers. Capturing a deferred view leaves the carry
+        # intact for the next layer's fused HC pre operation.
+        defer = h.shape[:2] == (1, 1)
+        eval_every = _DECODE_EVAL_EVERY if h.shape[0] == 1 and h.shape[1] <= _DECODE_BLOCK else 0
+        n_layers = len(inner.layers)
         for layer_index, (layer, layer_cache) in enumerate(
             zip(inner.layers, cache, strict=True)
         ):

@@ -69,7 +69,7 @@ def _cache_parts(cache):
 _DECODE_FUSION = is_nax_available()
 _DECODE_BLOCK = 8
 
-# One-token decode forwards start evaluating every this many layers.
+# Decode and short verification start evaluating every this many layers.
 # A step is ~800 dependent dispatches whose Python graph build takes ~2.7 ms;
 # mlx keeps at most ~10 command buffers in flight and, with its default
 # per-buffer size budget (every expert or projection weight input counts in
@@ -1773,6 +1773,7 @@ class Glm5NextDecoderLayer(nn.Module):
         self.compile_ffn = True
         self._ffn_c = None
         self._ffn_dc = None
+        self._ffn_eager_shapes = set()
 
     def __call__(
         self,
@@ -1799,11 +1800,14 @@ class Glm5NextDecoderLayer(nn.Module):
             xn, post, comb = fused
         r = self.self_attn(xn, mask, cache)
         x = _decode_hc_expand(r, residual, post, comb)
-        # Compile the FFN block only for single-stream decode (B=1, S=1) -- the shape it
-        # was validated on and where its win lives. Compiling the 288-expert MoE at a
-        # batched or prefill shape spikes memory (it can OOM alongside the resident
-        # weights), so those shapes take the eager path.
-        if self.compile_ffn and x.shape[0] == 1 and x.shape[1] == 1:
+        # Short verification shares the decode compiler; prefill remains eager.
+        if self.compile_ffn and x.shape[0] == 1 and 1 <= x.shape[1] <= _DECODE_BLOCK:
+            shape = (x.shape, x.dtype)
+            if x.shape[1] > 1 and shape not in self._ffn_eager_shapes:
+                # Prime bitwise kernel checks once per verification shape;
+                # they cannot evaluate their canaries inside a compiled trace.
+                self._ffn_eager_shapes.add(shape)
+                return self._ffn_block(x)
             if self._ffn_c is None:
                 self._ffn_c = mx.compile(self._ffn_block)
             return self._ffn_c(x)
@@ -1903,10 +1907,10 @@ class Glm5NextModel(nn.Module):
             if prefill
             else None
         )
-        # One-token decode: start encoding the step every few layers while the
+        # Decode/verify: start encoding the step every few layers while the
         # rest of the graph is still being built (scheduling only, see
         # _DECODE_EVAL_EVERY).
-        eval_every = _DECODE_EVAL_EVERY if h.shape[1] == 1 else 0
+        eval_every = _DECODE_EVAL_EVERY if h.shape[0] == 1 and h.shape[1] <= _DECODE_BLOCK else 0
         n_layers = len(self.layers)
         # One token: each layer's last HC expand runs inside the next layer's
         # first HC pre (see _decode_hc_pre_deferred); the last one here.
