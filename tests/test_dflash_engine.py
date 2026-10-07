@@ -308,7 +308,8 @@ class TestDFlashEngineInit:
         )
         assert engine.get_cache_stats() is None
 
-    def test_stream_events_passes_suppress_token_ids(self, monkeypatch):
+    @pytest.mark.parametrize("skip_cache_store", [False, True])
+    def test_stream_events_passes_suppress_token_ids(self, monkeypatch, skip_cache_store):
         try:
             from dflash_mlx import runtime as dflash_runtime
             from dflash_mlx.server.prefix_cache_flow import PrefixCacheFlow
@@ -338,9 +339,9 @@ class TestDFlashEngineInit:
 
         fake_flow = SimpleNamespace(
             snapshot=snapshot,
-            snapshot_service=None,
+            snapshot_service=object(),
             stable_prefix_len=None,
-            cache_active=False,
+            cache_active=True,
             publish_generation_snapshot=True,
             hit_kind="l2_prefix",
         )
@@ -374,6 +375,7 @@ class TestDFlashEngineInit:
             min_p=0.05,
             repetition_penalty=1.2,
             repetition_context_size=128,
+            skip_cache_store=skip_cache_store,
         )
 
         assert list(event_iter) == []
@@ -388,6 +390,9 @@ class TestDFlashEngineInit:
         assert captured["min_p"] == 0.05
         assert captured["repetition_penalty"] == 1.2
         assert captured["repetition_context_size"] == 128
+        assert captured["prefix_cache_active"] is (not skip_cache_store)
+        assert captured["publish_generation_snapshot"] is (not skip_cache_store)
+        assert (captured["snapshot_service"] is None) is skip_cache_store
         assert captured["block_tokens"] == 5
         assert fake_flow.snapshot is None
         assert prefix_kwargs["max_new_tokens"] == 3
@@ -1611,10 +1616,12 @@ class TestDFlashCachedTokensWiring:
             min_p,
             repetition_penalty,
             repetition_context_size,
+            skip_cache_store=False,
         ):
             assert (temperature, top_p, top_k, min_p) == (0.7, 0.9, 0, 0.0)
             assert repetition_penalty == 1.2
             assert repetition_context_size == 128
+            assert not skip_cache_store
             return iter([summary]), fake_flow, [2]
 
         monkeypatch.setattr(engine, "_stream_dflash_events", fake_stream_events)
@@ -2156,6 +2163,37 @@ async def test_generation_abort_lifetime(monkeypatch, caplog, streaming, scenari
         assert not engine._active_stop_events
         assert closed.is_set() is (blocker is None)
         assert engine.get_activity_snapshot()["active_requests"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("skip_cache_store", [False, True])
+async def test_generation_forwards_skip_cache_store(monkeypatch, streaming, skip_cache_store):
+    from dflash_mlx.engine.events import SummaryEvent
+    from omlx.engine.dflash import DFlashEngine
+
+    engine = DFlashEngine(model_name="test-model", draft_model_path="test-draft")
+    engine._loaded = True
+    engine._tokenizer_obj = SimpleNamespace(decode=lambda *args, **kwargs: "")
+    engine._executor_tokenizer = engine._tokenizer_obj
+    summary = SummaryEvent(
+        elapsed_us=1000, prompt_token_count=1, generated_token_ids=(5,),
+        generation_tokens=1, accepted_from_draft=0, acceptance_ratio=0.0,
+        cycles_completed=1, phase_timings_us={},
+    )
+    engine._stream_dflash_events = MagicMock(return_value=(iter([summary]), None, []))
+    monkeypatch.setattr(
+        "omlx.engine.dflash.create_streaming_detokenizer", lambda *args, **kwargs: None
+    )
+    kwargs = {"skip_cache_store": True} if skip_cache_store else {}
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        monkeypatch.setattr("omlx.engine_core.get_mlx_executor", lambda: executor)
+        if streaming:
+            outputs = [o async for o in engine.stream_generate([1], **kwargs)]
+            assert outputs[-1].finished
+        else:
+            await engine.generate([1], **kwargs)
+    assert engine._stream_dflash_events.call_args.kwargs["skip_cache_store"] is skip_cache_store
 
 
 @pytest.mark.asyncio

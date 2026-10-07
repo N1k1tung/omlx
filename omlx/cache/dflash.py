@@ -166,7 +166,7 @@ def install_native_cache_hooks():
         # Stock generation snapshots suppress prompt publication. Native blocks
         # need prompt and accepted-generation boundaries independently.
         ops = self.target_ops
-        ops.prefill_service = service
+        ops.prefill_service = service if service.active else None
         ops.prompt_tokens = request.prompt_tokens
         ops.position = self.snap_prefix_len
         service._prefill_request_id = uuid.uuid4().hex
@@ -661,6 +661,8 @@ class NativeSnapshotService:
         return False
 
     def store_target(self, token_ids, target_cache):
+        if not self.active:
+            return None
         n = len(token_ids)
         offsets = [offset for c in target_cache if (offset := _offset(c)) is not None]
         if not n or (offsets and any(offset != n for offset in offsets)):
@@ -732,7 +734,7 @@ class NativeSnapshotService:
         require_logits=False,
         **kwargs,
     ):
-        if target_hidden is None:
+        if not self.active or target_hidden is None:
             return None
         if require_logits and last_logits is None:
             raise ValueError(f"{kind} snapshot requires last_logits")

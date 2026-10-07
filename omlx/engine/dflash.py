@@ -1422,6 +1422,7 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
         min_p: float = 0.0,
         repetition_penalty: float = 1.0,
         repetition_context_size: int = 20,
+        skip_cache_store: bool = False,
     ):
         """Build the dflash event iterator with prefix cache plumbed in."""
         from dflash_mlx.runtime import stream_dflash_generate
@@ -1456,6 +1457,11 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
             max_new_tokens=max_tokens,
             runtime_context=self._runtime_context,
         )
+        if skip_cache_store:
+            if self._native_cache:
+                prefix_flow.snapshot_service.active = False
+            else:
+                prefix_flow.snapshot_service = None
 
         event_iter = stream_dflash_generate(
             target_model=self._target_model,
@@ -1480,8 +1486,10 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
             prefix_snapshot=prefix_flow.snapshot,
             snapshot_service=prefix_flow.snapshot_service,
             stable_prefix_len=prefix_flow.stable_prefix_len,
-            prefix_cache_active=prefix_flow.cache_active,
-            publish_generation_snapshot=prefix_flow.publish_generation_snapshot,
+            prefix_cache_active=prefix_flow.cache_active and not skip_cache_store,
+            publish_generation_snapshot=(
+                prefix_flow.publish_generation_snapshot and not skip_cache_store
+            ),
             prefix_hit_kind=str(getattr(prefix_flow, "hit_kind", "miss") or "miss"),
             runtime_context=self._runtime_context,
         )
@@ -1564,6 +1572,7 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
         queue: asyncio.Queue,
         loop: asyncio.AbstractEventLoop,
         stop_event: threading.Event,
+        skip_cache_store: bool = False,
     ) -> None:
         """Run dflash generation with streaming on MLX executor thread.
 
@@ -1590,6 +1599,7 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
                 min_p=min_p,
                 repetition_penalty=repetition_penalty,
                 repetition_context_size=repetition_context_size,
+                skip_cache_store=skip_cache_store,
             )
             self._record_prefill_guard_active_memory()
 
@@ -1790,6 +1800,7 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
 
         tools = kwargs.pop("tools", None)
         seed = kwargs.pop("seed", None)
+        skip_cache_store = bool(kwargs.pop("skip_cache_store", False))
         repetition_context_size = kwargs.pop("repetition_context_size", None)
         if repetition_context_size is None:
             repetition_context_size = 20
@@ -1824,6 +1835,7 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
                     min_p=min_p,
                     repetition_penalty=repetition_penalty,
                     repetition_context_size=int(repetition_context_size),
+                    skip_cache_store=skip_cache_store,
                 )
                 self._record_prefill_guard_active_memory()
                 tokens: list[int] = []
@@ -2029,6 +2041,7 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
 
         tools = kwargs.pop("tools", None)
         seed = kwargs.pop("seed", None)
+        skip_cache_store = bool(kwargs.pop("skip_cache_store", False))
         repetition_context_size = kwargs.pop("repetition_context_size", None)
         if repetition_context_size is None:
             repetition_context_size = 20
@@ -2074,6 +2087,7 @@ class DFlashEngine(ActivityTrackingMixin, BaseEngine):
                 queue,
                 loop,
                 stop_event,
+                skip_cache_store=skip_cache_store,
             )
         except Exception:
             self._unregister_stop_event(stop_event)

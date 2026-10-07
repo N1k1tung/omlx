@@ -717,6 +717,59 @@ def test_full_runtime_repeats_prompt_after_generation(setup, monkeypatch):
         assert flow.hit_tokens == expected
 
 
+@pytest.mark.parametrize("cache_hit", ["miss", "exact", "target_only"])
+def test_skip_cache_store_preserves_lookup_without_publication(setup, monkeypatch, cache_hit):
+    from omlx.engine.dflash import DFlashEngine
+    from dflash_mlx.engine.events import PrefillCompleteEvent, SummaryEvent
+
+    cache, draft, backend, provider, context = setup
+    tokens = [i % 7 + 1 for i in range(4101)]
+    engine = DFlashEngine("proof", "draft")
+    provider.draft_cache_identity = (
+        engine._draft_quant_enabled, engine._draft_quant_weight_bits,
+        engine._draft_quant_activation_bits, engine._draft_quant_group_size,
+    )
+    if cache_hit != "miss":
+        prefill(setup, tokens)
+    if cache_hit == "target_only":
+        monkeypatch.setattr(cache.ssd, "load_prefix_context", lambda *a: None)
+
+    def fail(*args, **kwargs):
+        pytest.fail("skip_cache_store must bypass cache publication and preparation")
+
+    monkeypatch.setattr(bridge.NativeSnapshotService, "store_target", fail)
+    monkeypatch.setattr(cache.prefix, "store_cache", fail)
+    monkeypatch.setattr(cache.ssd, "save_prefix_context", fail)
+    monkeypatch.setattr(cache, "prune_context_tips", fail)
+    if cache.boundary_store is not None:
+        monkeypatch.setattr(cache.boundary_store, "save", fail)
+    before = cache.ssd.get_stats_dict()["prefix_context_count"]
+    engine._target_model = provider.model
+    engine._target_ops = provider.target_ops
+    engine._draft_model = draft
+    engine._draft_backend = backend
+    engine._executor_tokenizer = provider.tokenizer
+    engine._runtime_context = context
+    engine._native_cache = cache
+    engine._block_size = 1
+    iterator, flow, _ = engine._stream_dflash_events(
+        tokens, max_tokens=1, skip_cache_store=True
+    )
+    events = list(iterator)
+    complete = next(e for e in events if isinstance(e, PrefillCompleteEvent))
+    summary = next(e for e in events if isinstance(e, SummaryEvent))
+    assert complete.prefill_tokens_restored == {
+        "miss": 0, "exact": len(tokens), "target_only": 4094,
+    }[cache_hit]
+    assert summary.generated_token_ids == (7,)
+    assert flow.hit_tokens == complete.prefill_tokens_restored
+    assert not flow.snapshot_service.active
+    assert flow.insert_ms == 0
+    assert cache.ssd.get_stats_dict()["prefix_context_count"] == before
+    assert not cache.prefix._request_tables
+    assert not cache.paged.request_tables
+
+
 @pytest.mark.parametrize("as_list", [False, True])
 def test_boundary_capture_preserves_backend_hidden_layout(setup, monkeypatch, as_list):
     _, _, _, provider, _ = setup
