@@ -169,6 +169,7 @@ def install_native_cache_hooks():
         ops.prefill_service = service
         ops.prompt_tokens = request.prompt_tokens
         ops.position = self.snap_prefix_len
+        service._prefill_request_id = uuid.uuid4().hex
         try:
             replayed = getattr(request.prefix_snapshot, "replayed_tokens", 0)
             iterator = original_prefill(
@@ -222,6 +223,9 @@ def install_native_cache_hooks():
             ops.prefill_service = None
             ops.prompt_tokens = ()
             object.__setattr__(request, "prefix_snapshot", None)
+            service.cache.prefix.release_cache(service._prefill_request_id)
+            service.cache.paged.delete_block_table(service._prefill_request_id)
+            service._prefill_request_id = None
 
     TargetFeatureStore.hydrate_from_snapshot = hydrate_features
     SpeculativeSession.open = classmethod(open_session)
@@ -647,6 +651,7 @@ class NativeSnapshotService:
         self.previous_context_tips = previous_context_tips
         self._published_tip = None
         self._published_context_tip = None
+        self._prefill_request_id = None
         self.insert_ms = 0.0
         self.active = True
 
@@ -664,11 +669,12 @@ class NativeSnapshotService:
         if not states:
             return None
         started = time.perf_counter()
-        request_id = uuid.uuid4().hex
+        request_id = self._prefill_request_id or uuid.uuid4().hex
         try:
             compact_pooling_cache_snapshot(states, n, self.cache.block_size)
             compact_deepseek_v41_snapshot(states, n, self.cache.block_size)
-            self.cache.prefix.fetch_cache(request_id, token_ids)
+            if self.cache.paged.get_block_table(request_id) is None:
+                self.cache.prefix.fetch_cache(request_id, token_ids)
             boundaries = {n: states}
             if self.cache.boundary_store is not None:
                 from omlx.scheduler import _BoundarySnapshotProvider
@@ -697,9 +703,6 @@ class NativeSnapshotService:
             # generation may skip a block boundary. Native storage
             # then retains the earlier checkpoint; committed-boundary callbacks
             # in dflash-mlx would let composite caches retain the continuation.
-            # Boundary stores walk the whole prefix chain (O(n/block)); the
-            # upgrade path is a continuation store keyed off the previous
-            # checkpoint instead of re-fetching the full prompt.
             if table is None or table.num_tokens != n:
                 return None
             return self.cache.paged.allocated_blocks[table.block_ids[-1]].block_hash
@@ -707,7 +710,9 @@ class NativeSnapshotService:
             logger.warning("DFlash native boundary store failed: %s", exc)
             return None
         finally:
-            self.cache.prefix.release_cache(request_id)
+            if self._prefill_request_id is None:
+                self.cache.prefix.release_cache(request_id)
+                self.cache.paged.delete_block_table(request_id)
             if self.cache.boundary_store is not None:
                 self.cache.boundary_store.cleanup_request(request_id)
             self.insert_ms += (time.perf_counter() - started) * 1000

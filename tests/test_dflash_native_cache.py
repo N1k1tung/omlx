@@ -307,7 +307,8 @@ def test_native_entry_without_features_replays_window(setup, sink, monkeypatch):
 def test_cache_write_failure_keeps_generation_working(setup, monkeypatch):
     cache, *_ = setup
 
-    def fail(*args, **kwargs):
+    def fail(request_id, *args, **kwargs):
+        cache.paged.create_block_table(request_id)
         raise OSError("unavailable cache drive")
 
     monkeypatch.setattr(cache.prefix, "store_cache", fail)
@@ -315,6 +316,46 @@ def test_cache_write_failure_keeps_generation_working(setup, monkeypatch):
     assert flow.hit_tokens == 0
     assert state.prefill_logits[0, 0, 0].item() == 15
     assert not cache.prefix._request_tables
+    assert not cache.paged.request_tables
+
+
+@pytest.mark.parametrize("restored", [False, True])
+def test_prefill_extends_one_block_table_without_repeated_lookup(setup, monkeypatch, restored):
+    cache, *_ = setup
+    tokens = [i % 7 + 1 for i in range(3 * cache.block_size + 5)]
+    prefix_len = cache.block_size + 5 if restored else 0
+    if restored:
+        prefill(setup, tokens[:prefix_len])
+    lookups = []
+    stores = []
+    fetch = cache.prefix.fetch_cache
+    store = cache.prefix.store_cache
+
+    def record_fetch(request_id, token_ids, **kwargs):
+        lookups.append(request_id)
+        return fetch(request_id, token_ids, **kwargs)
+
+    def record_store(request_id, token_ids, *args, **kwargs):
+        table = cache.paged.get_block_table(request_id)
+        stores.append((request_id, table, table.num_tokens if table else 0))
+        return store(request_id, token_ids, *args, **kwargs)
+
+    monkeypatch.setattr(cache.prefix, "fetch_cache", record_fetch)
+    monkeypatch.setattr(cache.prefix, "store_cache", record_store)
+    flow, _, state, _, _ = prefill(setup, tokens)
+    request_ids = {request_id for request_id, _, _ in stores}
+    assert len(request_ids) == 1
+    assert sum(request_id in request_ids for request_id in lookups) == 1
+    assert [n for _, _, n in stores] == (
+        [prefix_len, 2 * cache.block_size, 3 * cache.block_size]
+        if restored else [0, cache.block_size, 2 * cache.block_size, 3 * cache.block_size]
+    )
+    assert all(table is stores[1][1] for _, table, _ in stores[1:])
+    assert state.prefill_logits[0, 0, 0].item() == sum(tokens)
+    assert flow.snapshot_service._prefill_request_id is None
+    assert not cache.prefix._request_tables
+    assert not cache.paged.request_tables
+    assert prefill(setup, tokens)[0].hit_tokens == len(tokens)
 
 
 def test_changed_drafter_reuses_target_and_replays_features(setup):
@@ -472,9 +513,12 @@ def test_cancel_prefill_clears_boundary_capture(setup):
         request=request, state=_RequestState(), yield_pause=_YieldPauseTracker(False)
     )
     next(iterator)
+    assert cache.paged.get_block_table(flow.snapshot_service._prefill_request_id) is not None
     iterator.close()
     assert ops.prefill_service is None and ops.prompt_tokens == ()
     assert not cache.prefix._request_tables
+    assert not cache.paged.request_tables
+    assert flow.snapshot_service._prefill_request_id is None
 
 
 def test_split_recurrent_blocks_restore_through_native_handlers(setup, tmp_path):
