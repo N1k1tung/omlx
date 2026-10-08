@@ -134,13 +134,21 @@ class MockTokenizer:
 
     def __init__(self):
         self.eos_token_id = 2
+        self.bos_token_id = 1
 
-    def encode(self, text: str) -> List[int]:
+    def encode(self, text: str, add_special_tokens: bool | None = None) -> list[int]:
         # Simple simulation: split by words
-        return [100 + i for i, _ in enumerate(text.split())]
+        ids = [100 + i for i, _ in enumerate(text.split())]
+        return [self.bos_token_id, *ids] if add_special_tokens else ids
 
     def decode(self, tokens: List[int], skip_special_tokens: bool = True) -> str:
         return f"<decoded:{len(tokens)} tokens>"
+
+    def convert_ids_to_tokens(self, tokens: list[int]) -> list[str]:
+        return [f"tok{t}" for t in tokens]
+
+    def __len__(self) -> int:
+        return 1000
 
     def apply_chat_template(
         self, messages: List[Dict], tokenize: bool = False, **kwargs
@@ -160,6 +168,7 @@ class MockBaseEngine(BaseEngine):
         self._model_name = model_name
         self._tokenizer = MockTokenizer()
         self._model_type = "llama"
+        self.tokenize_chat_calls: list[dict[str, Any]] = []
 
     @property
     def model_name(self) -> str:
@@ -204,6 +213,20 @@ class MockBaseEngine(BaseEngine):
     ) -> int:
         prompt = self._tokenizer.apply_chat_template(messages, tokenize=False)
         return len(self._tokenizer.encode(prompt))
+
+    async def tokenize_chat(
+        self, messages: list[dict], tools=None, chat_template_kwargs=None, **kwargs
+    ) -> list[int]:
+        self.tokenize_chat_calls.append(
+            {
+                "messages": messages,
+                "tools": tools,
+                "chat_template_kwargs": chat_template_kwargs,
+                **kwargs,
+            }
+        )
+        prompt = self._tokenizer.apply_chat_template(messages, tokenize=False)
+        return self._tokenizer.encode(prompt, kwargs.get("add_special_tokens"))
 
     async def chat(self, messages: List[Dict], **kwargs) -> MockGenerationOutput:
         return MockGenerationOutput(text="Chat response.")
@@ -2019,6 +2042,181 @@ class TestTokenCountEndpoint:
         assert response.status_code == 200
         data = response.json()
         assert "input_tokens" in data
+
+
+class TestTokenizeEndpoints:
+    """Tests for the vLLM-compatible /tokenize and /detokenize endpoints."""
+
+    def test_prompt_matches_completions_encoding(self, client, mock_engine_pool):
+        response = client.post(
+            "/tokenize",
+            json={
+                "model": "test-model",
+                "prompt": "hello big world",
+                "return_token_strs": True,
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["tokens"] == [1, 100, 101, 102]
+        assert data["count"] == 4
+        assert data["token_strs"] == ["tok1", "tok100", "tok101", "tok102"]
+        assert isinstance(data["max_model_len"], int)
+        assert mock_engine_pool.get_engine_calls[-1]["_lease"] is True
+        assert mock_engine_pool.release_calls == ["test-model"]
+
+    def test_prompt_without_special_tokens(self, client):
+        response = client.post(
+            "/v1/tokenize",
+            json={
+                "model": "test-model",
+                "prompt": "hello world",
+                "add_special_tokens": False,
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()["tokens"] == [100, 101]
+        assert response.json()["token_strs"] is None
+
+    def test_chat_goes_through_engine_rendering(self, client, mock_llm_engine):
+        response = client.post(
+            "/tokenize",
+            json={
+                "model": "test-model",
+                "messages": [
+                    {"role": "system", "content": "be brief"},
+                    {"role": "user", "content": "hi there"},
+                ],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {"name": "lookup", "parameters": {}},
+                    }
+                ],
+                "chat_template_kwargs": {"enable_thinking": False},
+            },
+        )
+
+        assert response.status_code == 200
+        call = mock_llm_engine.tokenize_chat_calls[-1]
+        assert [m["role"] for m in call["messages"]] == ["system", "user"]
+        assert call["tools"][0]["function"]["name"] == "lookup"
+        assert call["chat_template_kwargs"] == {"enable_thinking": False}
+        assert call["is_partial"] is False
+        assert call["add_generation_prompt"] is None
+        assert call["add_special_tokens"] is None
+        assert response.json()["count"] == len(response.json()["tokens"])
+
+    @pytest.mark.parametrize(
+        ("flags", "is_partial", "add_generation_prompt"),
+        [
+            ({"continue_final_message": True}, True, None),
+            (
+                {"continue_final_message": True, "add_generation_prompt": False},
+                True,
+                None,
+            ),
+            ({"add_generation_prompt": False}, False, False),
+        ],
+    )
+    def test_chat_generation_prompt_flags(
+        self, client, mock_llm_engine, flags, is_partial, add_generation_prompt
+    ):
+        response = client.post(
+            "/tokenize",
+            json={
+                "model": "test-model",
+                "messages": [
+                    {"role": "user", "content": "hi"},
+                    {"role": "assistant", "content": "Sure,"},
+                ],
+                **flags,
+            },
+        )
+
+        assert response.status_code == 200
+        call = mock_llm_engine.tokenize_chat_calls[-1]
+        assert call["is_partial"] is is_partial
+        assert call["add_generation_prompt"] is add_generation_prompt
+
+    def test_conflicting_generation_flags_use_openai_error_format(self, client):
+        response = client.post(
+            "/tokenize",
+            json={
+                "model": "test-model",
+                "messages": [{"role": "assistant", "content": "Sure,"}],
+                "continue_final_message": True,
+                "add_generation_prompt": True,
+            },
+        )
+
+        assert response.status_code == 422
+        assert "continue_final_message" in response.json()["error"]["message"]
+
+    @pytest.mark.parametrize(
+        ("body", "param"),
+        [
+            (
+                {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "what is this"},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {"url": "data:image/png;base64,AA"},
+                                },
+                            ],
+                        }
+                    ]
+                },
+                "messages[0].content",
+            ),
+            (
+                {
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "chat_template": "{{ messages }}",
+                },
+                "chat_template",
+            ),
+        ],
+    )
+    def test_chat_rejects_unsupported_input(
+        self, client, mock_engine_pool, body, param
+    ):
+        response = client.post("/tokenize", json={"model": "test-model", **body})
+
+        assert response.status_code == 400
+        assert response.json()["error"]["param"] == param
+        assert mock_engine_pool.get_engine_calls == []
+
+    def test_detokenize(self, client, mock_engine_pool):
+        response = client.post(
+            "/detokenize", json={"model": "test-model", "tokens": [1, 100, 101]}
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {"prompt": "<decoded:3 tokens>"}
+        assert mock_engine_pool.release_calls == ["test-model"]
+
+    @pytest.mark.parametrize(
+        ("tokens", "status", "param"),
+        [([100, 1000], 400, "tokens[1]"), ([-1], 422, None)],
+    )
+    def test_detokenize_rejects_invalid_ids(
+        self, client, mock_engine_pool, tokens, status, param
+    ):
+        response = client.post(
+            "/v1/detokenize", json={"model": "test-model", "tokens": tokens}
+        )
+
+        assert response.status_code == status
+        if param is not None:
+            assert response.json()["error"]["param"] == param
+            assert mock_engine_pool.release_calls == ["test-model"]
 
 
 class TestMCPEndpoints:

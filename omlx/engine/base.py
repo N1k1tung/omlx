@@ -550,6 +550,24 @@ class BaseEngine(ABC):
         """
         return None
 
+    async def tokenize_chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict] | None = None,
+        chat_template_kwargs: dict[str, Any] | None = None,
+        is_partial: bool | None = None,
+        add_generation_prompt: bool | None = None,
+        add_special_tokens: bool | None = None,
+    ) -> list[int]:
+        """Return the prompt token IDs that ``chat()`` submits for ``messages``.
+
+        ``add_generation_prompt`` overrides the partial-derived default.
+        ``add_special_tokens=None`` keeps the engine's own generation behavior.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support chat tokenization"
+        )
+
 
 class ActivityTrackingMixin:
     """In-flight operation tracking for admin visibility.

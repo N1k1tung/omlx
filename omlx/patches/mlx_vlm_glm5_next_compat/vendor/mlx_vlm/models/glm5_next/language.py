@@ -1562,34 +1562,16 @@ class Glm5NextMoEGate(nn.Module):
         if (
             _DECODE_FUSION
             and x.ndim == 3
-            and x.shape[:2] == (1, 1)
-            and self.n_group == 1
-        ):
-            # One token: the reference logits come from the one-row fp32
-            # gemv, which the fused router reproduces (multi-row calls use
-            # a different matmul and keep the reference path).
-            routed = _decode_kernels.moe_router(
-                x.reshape(1, -1),
-                self.weight,
-                self.e_score_correction_bias,
-                self.top_k,
-                self.routed_scaling_factor,
-                self.norm_topk_prob,
-            )
-            if routed is not None:
-                indices, scores = routed
-                return indices.reshape(1, 1, -1), scores.reshape(1, 1, -1)
-        if (
-            _DECODE_FUSION
-            and x.ndim == 3
             and x.shape[0] == 1
-            and 2 <= x.shape[1] <= _DECODE_BLOCK
+            and 1 <= x.shape[1] <= _DECODE_BLOCK
             and self.n_group == 1
         ):
-            # Verify block: the reference logits come from MLX's NAX split-K
-            # GEMM, which moe_router_rows reproduces op for op.
-            routed = _decode_kernels.moe_router_rows(
-                x.reshape(x.shape[1], -1),
+            # Every row uses the one-token fp32 gemv arithmetic, so verify
+            # rows route like their decode steps. The stock block GEMM uses
+            # TF32 on NAX and can pick other experts.
+            rows = x.shape[1]
+            routed = _decode_kernels.moe_router(
+                x.reshape(rows, -1),
                 self.weight,
                 self.e_score_correction_bias,
                 self.top_k,
@@ -1598,7 +1580,7 @@ class Glm5NextMoEGate(nn.Module):
             )
             if routed is not None:
                 indices, scores = routed
-                return indices.reshape(1, x.shape[1], -1), scores.reshape(1, x.shape[1], -1)
+                return indices.reshape(1, rows, -1), scores.reshape(1, rows, -1)
         logits = x.astype(mx.float32) @ self.weight.astype(mx.float32).T
         return group_expert_select(
             logits,
@@ -1947,6 +1929,49 @@ class Glm5NextModel(nn.Module):
         return self.norm(h)
 
 
+def _dequantize_router_gates(weights, hidden_size):
+    """Restore affine router weights before strict loading into a plain gate."""
+    for scales_key in [k for k in weights if k.endswith(".mlp.gate.scales")]:
+        prefix = scales_key[: -len("scales")]
+        weight_key = prefix + "weight"
+        if weight_key not in weights:
+            continue
+        packed = weights[weight_key]
+        scales = weights[scales_key]
+        biases = weights.get(prefix + "biases")
+        if (
+            hidden_size <= 0
+            or packed.ndim != 2
+            or scales.ndim != 2
+            or packed.dtype != mx.uint32
+            or not mx.issubdtype(scales.dtype, mx.floating)
+            or scales.shape[0] != packed.shape[0]
+            or scales.shape[-1] == 0
+            or hidden_size % scales.shape[-1]
+            or (packed.shape[-1] * 32) % hidden_size
+            or (packed.shape[-1] * 32 // hidden_size) not in (2, 3, 4, 5, 6, 8)
+            or (hidden_size // scales.shape[-1]) not in (32, 64, 128)
+            or biases is None
+            or biases.shape != scales.shape
+        ):
+            raise ValueError(
+                f"{weight_key}: cannot infer quantization from shapes "
+                f"{tuple(packed.shape)} / {tuple(scales.shape)}"
+            )
+        # The router has no quantized module, so restore fp32 like stock gates.
+        weights[weight_key] = mx.dequantize(
+            packed,
+            scales,
+            biases,
+            group_size=hidden_size // scales.shape[-1],
+            bits=packed.shape[-1] * 32 // hidden_size,
+            mode="affine",
+        ).astype(mx.float32)
+        weights.pop(scales_key)
+        weights.pop(prefix + "biases", None)
+    return weights
+
+
 class LanguageModel(nn.Module):
     def __init__(self, args: TextConfig, config: ModelConfig = None):
         super().__init__()
@@ -1981,6 +2006,7 @@ class LanguageModel(nn.Module):
 
     def sanitize(self, weights):
         weights = {k: v for k, v in weights.items() if "mtp." not in k}
+        weights = _dequantize_router_gates(weights, self.args.hidden_size)
         weights = DSV32Model.sanitize(self, weights)
 
         remapped = {}

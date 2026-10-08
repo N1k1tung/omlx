@@ -1136,6 +1136,9 @@ final class ModelSettingsScreenVM {
     }
 
     var isQwenOqA8Model: Bool {
+        // qwen4_exp (Qwen3.8-Flash-Next) matches exactly: only that validated
+        // family has routed-expert A8, not every qwen4*.
+        if isQwen4Exp { return true }
         let type = (model?.configModelType ?? "").lowercased().replacingOccurrences(of: "-", with: "_")
         return ["qwen3_5", "qwen3_6", "qwen3_8"].contains { type.hasPrefix($0) }
     }

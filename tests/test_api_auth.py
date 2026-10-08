@@ -636,6 +636,10 @@ class TestUnauthenticatedInference:
             "/v1/systemone",
             "/v1/responses",
             "/v1/audio/speech",
+            "/tokenize",
+            "/v1/tokenize",
+            "/detokenize",
+            "/v1/detokenize",
         ],
     )
     def test_http_inference_auth_gate(self, configured_server, path):

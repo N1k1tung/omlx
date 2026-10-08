@@ -956,6 +956,46 @@ class BatchedEngine(BaseEngine):
         Returns:
             Number of prompt tokens
         """
+        return len(
+            self._encode_chat_prompt(
+                messages,
+                tools,
+                chat_template_kwargs=chat_template_kwargs,
+                is_partial=is_partial,
+            )
+        )
+
+    async def tokenize_chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict] | None = None,
+        chat_template_kwargs: dict[str, Any] | None = None,
+        is_partial: bool | None = None,
+        add_generation_prompt: bool | None = None,
+        add_special_tokens: bool | None = None,
+    ) -> list[int]:
+        if not self._loaded:
+            await self.start()
+        return self._encode_chat_prompt(
+            messages,
+            tools,
+            chat_template_kwargs=chat_template_kwargs,
+            is_partial=is_partial,
+            add_generation_prompt=add_generation_prompt,
+            add_special_tokens=add_special_tokens,
+        )
+
+    def _encode_chat_prompt(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict] | None = None,
+        chat_template_kwargs: dict[str, Any] | None = None,
+        is_partial: bool | None = None,
+        add_generation_prompt: bool | None = None,
+        add_special_tokens: bool | None = None,
+    ) -> list[int]:
+        # Same rendering as chat(); the scheduler encodes the prompt with the
+        # tokenizer defaults.
         messages = self._preprocess_messages(messages)
         template_tools = convert_tools_for_template(tools) if tools else None
         prompt = self._apply_chat_template(
@@ -963,8 +1003,13 @@ class BatchedEngine(BaseEngine):
             template_tools,
             chat_template_kwargs=chat_template_kwargs,
             is_partial=is_partial,
+            add_generation_prompt=add_generation_prompt,
         )
-        return len(self._tokenizer.encode(prompt))
+        if add_special_tokens is None:
+            return list(self._tokenizer.encode(prompt))
+        return list(
+            self._tokenizer.encode(prompt, add_special_tokens=add_special_tokens)
+        )
 
     @staticmethod
     def _pop_specprefill_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:

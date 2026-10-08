@@ -7,10 +7,12 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
+import omlx.api.body_limit as body_limit
 import omlx.server as srv
+from omlx.api.body_limit import RequestBodySizeLimitMiddleware
 from omlx.engine.decision import DecisionEngine
 from omlx.engine_pool import EngineEntry
 from omlx.exceptions import (
@@ -555,6 +557,7 @@ class TestExceptionHandlers:
                 "messages[0].content",
             ),
             ("/v1/responses", {"input": "hi \ud83d"}, "input"),
+            ("/tokenize", {"prompt": "hi \ud83d"}, "prompt"),
         ],
     )
     def test_lone_surrogate_returns_400(self, client, path, body, param):
@@ -1247,3 +1250,58 @@ def test_anthropic_adaptive_thinking_reaches_minimax_m3_template(
         )
     assert response.status_code == 418, response.text
     assert engine.preflight_chat.call_args.kwargs["chat_template_kwargs"] == expected
+
+
+class TestRequestBodySizeLimit:
+    @pytest.fixture
+    def client(self):
+        small = FastAPI()
+        small.add_middleware(RequestBodySizeLimitMiddleware, max_bytes=1024)
+
+        @small.post("/echo")
+        async def echo(payload: dict):
+            return {"keys": len(payload)}
+
+        return TestClient(small)
+
+    def test_content_length_over_limit_is_rejected(self, client):
+        response = client.post(
+            "/echo", content=b"x" * 4096, headers={"content-type": "application/json"}
+        )
+        assert response.status_code == 413
+        assert response.json()["error"]["type"] == "request_too_large"
+
+    def test_content_length_under_limit_reaches_handler(self, client):
+        response = client.post("/echo", json={"a": 1})
+        assert response.status_code == 200
+        assert response.json() == {"keys": 1}
+
+    def test_chunked_body_stops_at_the_limit(self):
+        chunks = [b"x" * 40 for _ in range(5)]
+        seen = []
+
+        async def receive():
+            body = chunks.pop(0)
+            return {"type": "http.request", "body": body, "more_body": bool(chunks)}
+
+        async def inner_app(scope, receive, send):
+            total = 0
+            while True:
+                message = await receive()
+                if message["type"] == "http.disconnect":
+                    break
+                total += len(message["body"])
+                if not message["more_body"]:
+                    break
+            seen.append(total)
+
+        middleware = RequestBodySizeLimitMiddleware(inner_app, max_bytes=64)
+        scope = {"type": "http", "method": "POST", "path": "/echo", "headers": []}
+        asyncio.run(middleware(scope, receive, None))
+        assert seen == [40]  # The chunk that crosses the limit is dropped.
+
+    def test_limit_follows_raised_upload_limits(self, monkeypatch):
+        settings = GlobalSettings()
+        settings.server.max_audio_upload_size = "1GB"
+        monkeypatch.setattr(body_limit, "get_settings", lambda: settings)
+        assert body_limit._resolve_limit() > 1024**3

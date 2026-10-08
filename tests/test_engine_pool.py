@@ -1850,6 +1850,20 @@ class TestEnginePoolAsync:
         assert sig(off) != sig(on)
         assert sig(on) != sig(other_floor)
 
+    def test_oq_a8_toggle_changes_qwen4_exp_signature(self, pool_with_mock_engines):
+        """Flash-Next reloads on the same toggle, so routed-expert tags never
+        outlive an OFF request (OFF -> ON -> OFF -> ON each get a new engine)."""
+        from omlx.model_settings import ModelSettings
+
+        pool = pool_with_mock_engines
+        pool._entries["model-a"].config_model_type = "qwen4_exp"
+        sig = lambda enabled: pool._engine_runtime_signature(  # noqa: E731
+            "model-a", ModelSettings(qwen35_oq_a8_enabled=enabled)
+        )
+        assert sig(False) != sig(True)
+        assert sig(True) == sig(True)
+        assert sig(False) == sig(False)
+
     def test_oq_a8_tuning_is_ignored_while_disabled(self, pool_with_mock_engines):
         """A stale floor on a disabled feature must not split the engine."""
         from omlx.model_settings import ModelSettings

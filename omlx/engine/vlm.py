@@ -5947,6 +5947,44 @@ class VLMBatchedEngine(BaseEngine):
         )
         return len(self._tokenizer.encode(prompt))
 
+    async def tokenize_chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict] | None = None,
+        chat_template_kwargs: dict[str, Any] | None = None,
+        is_partial: bool | None = None,
+        add_generation_prompt: bool | None = None,
+        add_special_tokens: bool | None = None,
+    ) -> list[int]:
+        if not self._loaded:
+            await self.start()
+        if self.is_diffusion_model:
+            raise InvalidRequestError(
+                "Tokenization is not supported for diffusion models.",
+                field="model",
+            )
+        # mlx-vlm prepare_inputs() encodes the rendered prompt without
+        # special tokens, so there is no variant that adds them.
+        if add_special_tokens:
+            raise InvalidRequestError(
+                "add_special_tokens=true is not supported for this model; its "
+                "chat prompt is encoded without extra special tokens.",
+                field="add_special_tokens",
+            )
+        ct_kwargs = dict(chat_template_kwargs or {})
+        if add_generation_prompt is not None:
+            ct_kwargs["add_generation_prompt"] = add_generation_prompt
+        kwargs = {"chat_template_kwargs": ct_kwargs or None, "is_partial": is_partial}
+        loop = asyncio.get_running_loop()
+        token_ids, *_ = await loop.run_in_executor(
+            self._engine._mlx_executor,
+            self._process_chat_messages,
+            messages,
+            tools,
+            kwargs,
+        )
+        return list(token_ids)
+
     def has_active_requests(self) -> bool:
         """Check if the engine has active in-flight requests."""
         if self.is_diffusion_model:
