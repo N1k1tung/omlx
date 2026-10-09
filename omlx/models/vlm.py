@@ -241,7 +241,9 @@ class VLMModelAdapter(nn.Module):
     @property
     def supports_skip_lm_head(self) -> bool:
         """Whether the wrapped official language model has a cache-only pass."""
-        return self.model_type == "qwen4_exp"
+        return self.model_type == "qwen4_exp" or bool(
+            getattr(self._language_model, "_omlx_dflash_capture_from", False)
+        )
 
     @property
     def config(self):
@@ -557,7 +559,7 @@ class VLMModelAdapter(nn.Module):
             # Scheduler prefill chunks discard their logits. Translate the
             # shared cache-only contract into the official Qwen model hook so
             # those chunks do not project every token over the full vocabulary.
-            if self.model_type == "qwen4_exp":
+            if self.model_type in ("qwen4_exp", "glm5_next"):
                 kwargs["skip_logits"] = True
         inputs_embeds = kwargs.pop("inputs_embeds", None)
         vlm_extra = kwargs.pop("vlm_extra_kwargs", None) or {}

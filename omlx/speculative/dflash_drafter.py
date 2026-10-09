@@ -15,12 +15,15 @@ verify path feeds it the accepted positions after every cycle.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import math
 import time
 from collections.abc import Iterable, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import mlx.core as mx
@@ -48,6 +51,7 @@ class _RowContext:
     """
 
     pending: list[mx.array] = field(default_factory=list)
+    restored: mx.array | None = None
     fed: int = 0
     keys: list[mx.array] | None = None
     values: list[mx.array] | None = None
@@ -176,14 +180,16 @@ class DFlashDrafter:
         self.target_layer_ids: list[int] = [
             int(i) for i in model.config.target_layer_ids
         ]
-        self.block_size = int(block_size)
+        self.block_size = resolve_block_size(model, block_size)
         # Lightning MTP reads this as the fixed draft depth.
         self.depth = self.block_size - 1
         self._rows: dict[Any, _RowContext] = {}
         self._cohort: _Cohort | None = None
         # Prefill captures wait under the request id until the scheduler
         # learns the row uid at insert time.
-        self._request_seeds: dict[str, list[mx.array]] = {}
+        self._request_seeds: dict[str, _RowContext] = {}
+        self._prefix_tips: dict[str, tuple[int, bytes]] = {}
+        self._cache_signature: str | None = None
         # Row order of the generation batch whose ordinary decode step is
         # running, so a plain forward can be attributed to rows.
         self.scope_uids: tuple | None = None
@@ -230,10 +236,15 @@ class DFlashDrafter:
     def _bound_pending(self, row: _RowContext) -> None:
         # Only the newest ring_slots rows are ever attended, so rows queued
         # while drafting is off are dropped here; fed still counts them.
-        drop = sum(int(p.shape[1]) for p in row.pending) - self.ring_slots
+        restored = 0 if row.restored is None else row.restored.shape[1]
+        drop = restored + sum(int(p.shape[1]) for p in row.pending) - self.ring_slots
         if drop <= 0:
             return
         row.fed += drop
+        if row.restored is not None:
+            n = min(drop, restored)
+            row.restored = row.restored[:, n:] if n < restored else None
+            drop -= n
         while drop > 0:
             head = row.pending[0]
             if int(head.shape[1]) <= drop:
@@ -250,22 +261,37 @@ class DFlashDrafter:
         for index, uid in enumerate(uids):
             self.seed(uid, [layer[index : index + 1] for layer in captured])
 
-    def seed_request(self, request_id: str, captured: Sequence[mx.array]) -> None:
+    def seed_request(
+        self, request_id: str, captured: Sequence[mx.array], *, start: int | None = None
+    ) -> None:
         """Queue prefill captures for a request that has no row uid yet."""
         if captured:
-            self._request_seeds.setdefault(request_id, []).append(
-                _concat_captured(captured)
-            )
+            row = self._request_seeds.get(request_id)
+            if row is None:
+                row = self._request_seeds[request_id] = _RowContext(fed=start or 0)
+            elif start is not None and row.fed + self._pending_length(row) != start:
+                # A large chunk skips old rows; a retried chunk may overlap
+                # them. In either case start a contiguous captured timeline.
+                row = self._request_seeds[request_id] = _RowContext(fed=start)
+            row.pending.append(_concat_captured(captured))
+            self._bound_pending(row)
+
+    @staticmethod
+    def _pending_length(row: _RowContext) -> int:
+        return sum(p.shape[1] for p in row.pending) + (
+            0 if row.restored is None else row.restored.shape[1]
+        )
 
     def bind_uid(self, request_id: str, uid: Any) -> None:
-        seeds = self._request_seeds.pop(request_id, None)
-        if seeds:
-            row = self._row(uid)
-            row.pending.extend(seeds)
-            self._bound_pending(row)
+        # Retain the request handle until scheduler cleanup: the generator
+        # can drop a finished UID before its terminal cache is published.
+        row = self._request_seeds.get(request_id)
+        if row is not None:
+            self._rows[uid] = row
 
     def release_request(self, request_id: str) -> None:
         self._request_seeds.pop(request_id, None)
+        self._prefix_tips.pop(request_id, None)
 
     @contextmanager
     def decode_scope(self, uids: Iterable[Any]):
@@ -279,18 +305,181 @@ class DFlashDrafter:
     def release(self, uids: Iterable[Any]) -> None:
         self._predraft = None
         for uid in uids:
-            if self._rows.pop(uid, None) is not None:
+            if uid in self._rows:
                 self._detach_cohort()
+                self._rows.pop(uid)
 
     def clear(self) -> None:
         self._predraft = None
         self._rows.clear()
         self._cohort = None
         self._request_seeds.clear()
+        self._prefix_tips.clear()
 
     def context_length(self, uid: Any) -> int:
         row = self._rows.get(uid)
         return 0 if row is None else row.fed
+
+    @property
+    def cache_signature(self) -> str:
+        if self._cache_signature is None:
+            from mlx.utils import tree_flatten
+
+            path = Path(self.source_path)
+            files = sorted(path.glob("*.safetensors")) + [path / "config.json"]
+            identity = {
+                "version": 1,
+                "path": str(path.resolve()),
+                "files": [
+                    (str(p.name), p.stat().st_size, p.stat().st_mtime_ns)
+                    for p in files
+                    if p.is_file()
+                ],
+                "config": vars(self.model.config),
+                "window": self.window,
+                "block": self.block_size,
+                "projection": [
+                    (name, value.shape, str(value.dtype))
+                    for name, value in tree_flatten(self.model.fc.parameters())
+                ],
+            }
+            self._cache_signature = (
+                "batched-dflash:"
+                + hashlib.sha256(
+                    json.dumps(identity, sort_keys=True, default=str).encode()
+                ).hexdigest()
+            )
+        return self._cache_signature
+
+    def store_prefix_context(
+        self,
+        prefix_cache,
+        request_id: str,
+        tokens: list[int],
+        token_count: int,
+        *,
+        uid=None,
+        **cache_keys,
+    ) -> bool:
+        """Publish the ring and unfed features at the exact target boundary.
+
+        No extra target forward or retained hidden-history buffer: projected
+        pending rows and the already-built KV ring suffice to resume drafting.
+        The native sidecar API accounts both in the shared hot/SSD budgets.
+        """
+        ssd = getattr(prefix_cache, "paged_ssd_cache", None)
+        row = (
+            self._request_seeds.get(request_id) if uid is None else self._rows.get(uid)
+        )
+        if (
+            ssd is None
+            or row is None
+            or row.fed + self._pending_length(row) != token_count
+        ):
+            return False
+        previous = self._prefix_tips.get(request_id)
+        if (
+            previous
+            and previous[0] <= token_count
+            and previous[0] % prefix_cache.block_size == 0
+        ):
+            cache_keys.update(start_tokens=previous[0], parent_hash=previous[1])
+        tip = prefix_cache._mtp_prefix_chain_tip(tokens, token_count, **cache_keys)
+        if tip is None:
+            return False
+        tensors = {}
+        parts = [] if row.restored is None else [row.restored]
+        if row.pending:
+            hidden = (
+                row.pending[0]
+                if len(row.pending) == 1
+                else mx.concatenate(row.pending, axis=1)
+            )
+            parts.append(self.model.hidden_norm(self.model.fc(hidden)))
+        if parts:
+            tensors["pending"] = (
+                parts[0] if len(parts) == 1 else mx.concatenate(parts, axis=1)
+            )
+        keys, values, pos = row.keys, row.values, row.pos
+        if self._cohort is not None and uid in self._cohort.uids:
+            index = self._cohort.uids.index(uid)
+            keys = [layer[index] for layer in self._cohort.keys]
+            values = [layer[index] for layer in self._cohort.values]
+            pos = self._cohort.pos[index]
+        if pos is not None:
+            # Keep the ring's <=8 spare slots too: a direct restore avoids
+            # gather/scatter kernels, with constant overhead above the window.
+            tensors["pos"] = pos
+            for i, (k, v) in enumerate(zip(keys, values)):
+                tensors[f"key_{i}"] = k
+                tensors[f"value_{i}"] = v
+        metadata = {"tokens": str(token_count), "fed": str(row.fed)}
+        saved = ssd.save_prefix_context(
+            tip, self.cache_signature, tensors, metadata, token_count=token_count
+        )
+        if saved:
+            self._prefix_tips[request_id] = (token_count, tip)
+            # Reuse the projection computed for publication at the next
+            # draft, releasing the much wider target-layer concatenation.
+            row.restored = tensors.get("pending")
+            row.pending = []
+        return saved
+
+    def restore_prefix_context(
+        self, prefix_cache, request_id: str, tip: bytes, token_count: int
+    ) -> bool:
+        ssd = getattr(prefix_cache, "paged_ssd_cache", None)
+        if ssd is None:
+            return False
+        loaded = ssd.load_prefix_context(tip, self.cache_signature)
+        if loaded is None:
+            return False
+        tensors, meta = loaded
+        try:
+            fed = int(meta["fed"])
+            pending = tensors.get("pending")
+            n_pending = 0 if pending is None else pending.shape[1]
+            if (
+                int(meta["tokens"]) != token_count
+                or fed < 0
+                or fed + n_pending != token_count
+                or n_pending > self.ring_slots
+            ):
+                raise ValueError("DFlash context boundary mismatch")
+            if pending is not None and (
+                pending.ndim != 3
+                or pending.shape[0] != 1
+                or pending.shape[2] != self.model.config.hidden_size
+            ):
+                raise ValueError("DFlash pending feature layout mismatch")
+            row = _RowContext(fed=fed, restored=pending)
+            pos = tensors.get("pos")
+            if pos is not None:
+                attn = self.model.layers[0].self_attn
+                if pos.shape != (self.capacity,) or pos.dtype != mx.int32:
+                    raise ValueError("DFlash context ring layout mismatch")
+                row.pos = pos
+                row.keys, row.values = [], []
+                for i in range(len(self.model.layers)):
+                    k, v = tensors[f"key_{i}"], tensors[f"value_{i}"]
+                    if (
+                        k.shape != (attn.n_kv_heads, self.capacity, attn.head_dim)
+                        or v.shape != k.shape
+                    ):
+                        raise ValueError("DFlash context KV layout mismatch")
+                    row.keys.append(k)
+                    row.values.append(v)
+            elif fed > 0:
+                # A prefill-only snapshot has no ring: its fed count includes
+                # skipped old tokens, all attended rows live in pending.
+                if n_pending != min(token_count, self.ring_slots):
+                    raise ValueError("DFlash snapshot is missing attended context")
+            self._request_seeds[request_id] = row
+            self._prefix_tips[request_id] = (token_count, tip)
+            return True
+        except (KeyError, TypeError, ValueError, IndexError) as exc:
+            logger.debug("Ignoring invalid DFlash prefix context: %s", exc)
+            return False
 
     def draft(self, jobs: Sequence[tuple]) -> None:
         """Draft the next block for every job after its cycle committed.
@@ -306,14 +495,14 @@ class DFlashDrafter:
             row = self._row(state.uid)
             if captured:
                 row.pending.append(_concat_captured(captured))
-            if not row.pending:
+            if not row.pending and row.restored is None:
                 raise RuntimeError(
                     f"DFlash drafter has no context for uid={state.uid!r}"
                 )
             context = (
                 row.pending[0]
                 if len(row.pending) == 1
-                else mx.concatenate(row.pending, axis=1)
+                else (mx.concatenate(row.pending, axis=1) if row.pending else None)
             )
             row.pending = []
             anchor = committed.reshape(-1)[-1:].astype(mx.int32)
@@ -355,9 +544,13 @@ class DFlashDrafter:
         if not captured:
             return False
         row = self._row(state.uid)
-        unfed = sum(int(p.shape[1]) for p in row.pending)
+        unfed = self._pending_length(row)
         context = mx.concatenate([*row.pending, _concat_captured(captured)], axis=1)
-        if int(context.shape[1]) > self.ring_slots:
+        if (
+            int(context.shape[1])
+            + (0 if row.restored is None else row.restored.shape[1])
+            > self.ring_slots
+        ):
             return False
         sampler = None
         if gen_batch is not None and not bg._is_greedy(gen_batch):
@@ -387,6 +580,7 @@ class DFlashDrafter:
         row = self._row(state.uid)
         row.fed = pre.bases[0] + pre.unfed[0] + int(count)
         row.pending = []
+        row.restored = None
         tokens, accept_lps = pre.proposals[0]
         state.drafts = tokens.reshape(-1).astype(mx.uint32)
         state.draft_lps = []
@@ -473,35 +667,67 @@ class DFlashDrafter:
 
         # Context segments: keep at most ``slots`` newest tokens per row and
         # count the rest as skipped so absolute positions stay aligned.
-        segments, lengths, bases = [], [], []
-        for _state, row, context, _anchor, _sampler in rows:
-            skip = max(0, int(context.shape[1]) - slots)
+        segments, raw_lengths, raw_skips = [], [], []
+        for _state, _row, context, _anchor, _sampler in rows:
+            skip = max(0, (0 if context is None else context.shape[1]) - slots)
             if skip:
                 context = context[:, skip:]
             segments.append(context)
-            lengths.append(int(context.shape[1]))
-            bases.append(row.fed + skip)
-        width = max(lengths)
+            raw_lengths.append(0 if context is None else int(context.shape[1]))
+            raw_skips.append(skip)
+        raw_width = max(raw_lengths)
+        hidden_width = next((seg.shape[2] for seg in segments if seg is not None), 0)
         padded = mx.concatenate(
             [
                 (
                     seg
-                    if seg.shape[1] == width
+                    if seg is not None and seg.shape[1] == raw_width
                     else mx.concatenate(
                         [
-                            seg,
-                            mx.zeros(
-                                (1, width - seg.shape[1], seg.shape[2]), dtype=seg.dtype
-                            ),
+                            *([] if seg is None else [seg]),
+                            mx.zeros((1, raw_width - n, hidden_width), dtype=dtype),
                         ],
                         axis=1,
                     )
                 )
-                for seg in segments
+                for seg, n in zip(segments, raw_lengths)
             ],
             axis=0,
         )
-        h_ctx = model.hidden_norm(model.fc(padded))
+        fresh = model.hidden_norm(model.fc(padded)) if raw_width else None
+        if all(row.restored is None for _state, row, *_ in rows):
+            # Ordinary cycles retain the original single batched projection.
+            lengths, width, h_ctx = raw_lengths, raw_width, fresh
+            bases = [row.fed + skip for (_state, row, *_), skip in zip(rows, raw_skips)]
+        else:
+            segments, lengths, bases = [], [], []
+            for index, ((_state, row, *_), n) in enumerate(zip(rows, raw_lengths)):
+                parts = [] if row.restored is None else [row.restored]
+                if n:
+                    parts.append(fresh[index : index + 1, :n])
+                context = parts[0] if len(parts) == 1 else mx.concatenate(parts, axis=1)
+                skip = max(0, int(context.shape[1]) - slots)
+                segments.append(context[:, skip:])
+                lengths.append(int(context.shape[1]) - skip)
+                bases.append(row.fed + raw_skips[index] + skip)
+            width = max(lengths)
+            h_ctx = mx.concatenate(
+                [
+                    (
+                        seg
+                        if n == width
+                        else mx.concatenate(
+                            [
+                                seg,
+                                mx.zeros((1, width - n, seg.shape[2]), dtype=seg.dtype),
+                            ],
+                            axis=1,
+                        )
+                    )
+                    for seg, n in zip(segments, lengths)
+                ],
+                axis=0,
+            )
 
         anchors = mx.concatenate([anchor for _, _, _, anchor, _ in rows]).astype(
             mx.int32
@@ -613,6 +839,7 @@ class DFlashDrafter:
                 rows, bases, lengths
             ):
                 row.fed = b + n
+                row.restored = None
 
         draft_hidden = model.norm(h)[:, 1:]
         logits = model._logits(draft_hidden)
@@ -941,7 +1168,9 @@ def resolve_block_size(model: nn.Module, requested: int | None) -> int:
     block = int(requested or trained or 0)
     if block <= 1:
         raise ValueError("DFlash block size must cover the anchor and one proposal")
-    limit = MAX_LIGHTNING_MTP_DRAFT_TOKENS + 1
+    # DFlash2's block includes the anchor. GLM's batched indexer pool can
+    # undo at most eight rows, including a completely rejected verify.
+    limit = min(8, MAX_LIGHTNING_MTP_DRAFT_TOKENS + 1)
     if trained and block > trained:
         block = trained
     return min(block, limit)

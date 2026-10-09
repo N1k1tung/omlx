@@ -232,7 +232,7 @@ def test_prefill_seed_binds_to_uid_and_window_slicing():
     drafter = _tiny_drafter()
     drafter.seed_request("req", _captured(3, seed=1))
     drafter.bind_uid("req", 7)
-    assert drafter._request_seeds == {}
+    assert drafter._request_seeds["req"] is drafter._rows[7]
     assert len(drafter._rows[7].pending) == 1
     drafter.release_request("req")
 
@@ -261,7 +261,7 @@ def test_prefill_seed_binds_to_uid_and_window_slicing():
 
     output = SimpleNamespace(hidden_states=_captured(15, seed=2))
     Scheduler._dflash_seed_prefill(scheduler, request, output, keep)
-    assert drafter._request_seeds["r"][0].shape == (
+    assert drafter._request_seeds["r"].pending[0].shape == (
         1,
         7,
         HIDDEN * len(TARGET_LAYER_IDS),
@@ -425,6 +425,318 @@ def test_resolve_block_size_clamps_to_trained_block_and_mtp_limit():
     assert dd.resolve_block_size(model, 5) == 5
     assert dd.resolve_block_size(model, 16) == 8
     model.config.block_size = 16
-    assert dd.resolve_block_size(model, None) == dd.MAX_LIGHTNING_MTP_DRAFT_TOKENS + 1
+    assert dd.resolve_block_size(model, None) == 8
     with pytest.raises(ValueError):
         dd.resolve_block_size(model, 1)
+
+
+@pytest.mark.parametrize("hot_only", [True, False])
+@pytest.mark.parametrize("fed", [0, 25])
+@pytest.mark.parametrize("quantized", [False, True])
+def test_prefix_context_restores_ring_pending_and_same_drafts(
+    tmp_path, hot_only, fed, quantized
+):
+    """Warm hot/SSD contexts resume across ring wraps without replaying the target."""
+    from omlx.cache.paged_cache import PagedCacheManager
+    from omlx.cache.paged_ssd_cache import PagedSSDCacheManager
+    from omlx.cache.prefix_cache import BlockAwarePrefixCache
+
+    original, resumed = _tiny_drafter(), _tiny_drafter()
+    if quantized:
+        for drafter in (original, resumed):
+            dd.quantize_drafter(drafter.model, bits=4, group_size=32)
+    ssd = PagedSSDCacheManager(
+        tmp_path,
+        2**20,
+        hot_cache_max_bytes=2**20 if hot_only else 0,
+        hot_cache_only=hot_only,
+        expected_model_name="tiny",
+        expected_block_size=4,
+    )
+    prefix = BlockAwarePrefixCache(
+        _tiny_target().language_model,
+        PagedCacheManager(block_size=4, model_name="tiny"),
+        ssd,
+    )
+    keys = {"extra_key_ranges": [(4, ("image-a",)), (24, ("image-a", "image-b"))]}
+    try:
+        original.seed_request("request", _captured(3, seed=22))
+        original.bind_uid("request", 7)
+        if fed:
+            _run_cycles(original, [{7: (fed - 3, 2)}])
+        original.seed(7, _captured(2, seed=33))
+        boundary = fed + 2 if fed else 5
+        tokens = list(range(boundary))
+        assert original.store_prefix_context(
+            prefix, "request", tokens, boundary, uid=7, **keys
+        )
+        tip = prefix._mtp_prefix_chain_tip(tokens, boundary, **keys)
+        assert not resumed.restore_prefix_context(
+            prefix, "wrong-boundary", tip, boundary + 1
+        )
+        assert resumed.restore_prefix_context(prefix, "resume", tip, boundary)
+        resumed.bind_uid("resume", 17)
+        # Changing either image identity cannot restore the other image's context.
+        different = prefix._mtp_prefix_chain_tip(
+            tokens, boundary, extra_key_ranges=[(4, ("image-c",))]
+        )
+        assert not resumed.restore_prefix_context(prefix, "other", different, boundary)
+        states = []
+        for drafter, uid in ((original, 7), (resumed, 17)):
+            state = SimpleNamespace(uid=uid, stats=None)
+            drafter.draft([(None, state, _captured(1, seed=55), mx.array([9]), None)])
+            states.append(state)
+        assert states[0].drafts.tolist() == states[1].drafts.tolist()
+        assert original.context_length(7) == resumed.context_length(17) == boundary + 1
+        original.release([7])
+        assert original.store_prefix_context(
+            prefix, "request", list(range(boundary + 1)), boundary + 1, **keys
+        )
+        original.release_request("request")
+        assert "request" not in original._request_seeds
+    finally:
+        ssd.close()
+
+
+def _glm_target_and_drafter():
+    from omlx.patches.mlx_vlm_mtp import glm5_next_vlm_runtime
+    from tests.test_mlx_vlm_glm5_next_compat import _tiny_config as glm_config
+
+    assert glm5_next_vlm_runtime.apply()
+    from mlx_vlm.models.glm5_next import Model
+
+    mx.random.seed(31)
+    target = Model(glm_config(with_vision=True))
+    config = _tiny_config(
+        vocab_size=128,
+        num_target_layers=2,
+        dflash_config={
+            "block_size": 16,
+            "mask_token_id": 127,
+            "target_layer_ids": [0, 1],
+            "conv_group_size": 8,
+            "conv_kernel_size": 2,
+            "selector_rank": 8,
+            "selector_top_k": 4,
+        },
+    )
+    model = DFlash2DraftModel(config)
+    model.bind(target)
+    mx.eval(target.parameters(), model.parameters())
+    return target, dd.DFlashDrafter(model, block_size=16, source_path="tiny-glm")
+
+
+@pytest.mark.parametrize("length", [5, 260])
+def test_glm_captures_match_existing_dflash_adapter_and_observe_decode(length):
+    from omlx.models.vlm import VLMModelAdapter
+    from omlx.patches.dflash_glm5 import Glm5NextTargetOps
+
+    target, drafter = _glm_target_and_drafter()
+    adapter = VLMModelAdapter(target)
+    tokens = (mx.arange(length, dtype=mx.uint32) % 64 + 1)[None]
+    cache = target.language_model.make_cache()
+    out = adapter(
+        tokens, cache=cache, capture_layer_ids=[1, 0], capture_from=length - 3
+    )
+    ops = Glm5NextTargetOps()
+    logits, captures = ops.forward_with_hidden_capture(
+        target,
+        input_ids=tokens,
+        cache=target.language_model.make_cache(),
+        capture_layer_ids={1, 2},
+        logits_last_only=False,
+    )
+    assert mx.allclose(out.logits, logits, atol=1e-5).item()
+    for got, index in zip(out.hidden_states, [2, 1]):
+        assert mx.allclose(got, captures[index][:, -3:], atol=1e-5).item()
+    dd.attach_drafter(target.language_model, drafter)
+    try:
+        with drafter.decode_scope([7]):
+            adapter(mx.array([[6]], dtype=mx.uint32), cache=cache)
+        assert drafter._pending_length(drafter._rows[7]) == 1
+        result = dd.bg._call_backbone_captured(
+            adapter,
+            mx.array([[7, 8]], dtype=mx.uint32),
+            cache,
+            capture_layer_ids=[0, 1],
+        )
+        assert len(result[3]) == 2 and len(result[2]) == 1
+    finally:
+        dd.detach_drafter(target.language_model)
+
+
+def test_missing_draft_sidecar_replays_only_a_window_and_preserves_blocks(tmp_path):
+    from types import MethodType
+
+    from mlx_lm.models.cache import KVCache
+
+    from omlx.cache.paged_cache import PagedCacheManager
+    from omlx.cache.paged_ssd_cache import PagedSSDCacheManager
+    from omlx.cache.prefix_cache import BlockAwarePrefixCache
+
+    drafter = _tiny_drafter()
+    paged = PagedCacheManager(block_size=4, model_name="tiny")
+    ssd = PagedSSDCacheManager(
+        tmp_path,
+        2**20,
+        hot_cache_max_bytes=2**20,
+        hot_cache_only=True,
+        expected_block_size=4,
+    )
+    prefix = BlockAwarePrefixCache(_tiny_target().language_model, paged, ssd)
+    tokens = list(range(40))
+    cache = KVCache()
+    data = mx.arange(40)[None, None, :, None].astype(mx.float32)
+    cache.update_and_fetch(data, data)
+    try:
+        stored = prefix.store_cache("stored", tokens, [cache])
+        paged.release_for_eviction(stored.block_ids)
+        prefix.clear_request_entry("stored")
+        table, _ = prefix.fetch_cache("new", tokens)
+        scheduler = SimpleNamespace(
+            model=SimpleNamespace(_omlx_drafter=drafter),
+            block_aware_cache=prefix,
+            paged_cache_manager=paged,
+            config=SimpleNamespace(paged_cache_block_size=4),
+        )
+        scheduler._dflash_restore_prefix_context = MethodType(
+            Scheduler._dflash_restore_prefix_context, scheduler
+        )
+        assert Scheduler._dflash_prepare_prefix_context(
+            scheduler, SimpleNamespace(request_id="new"), table
+        )
+        assert (
+            table.num_tokens == 28
+        )  # 11 context rows, rounded down to 4-token blocks.
+        assert all(
+            paged.allocated_blocks[bid].ref_count == 1 for bid in table.block_ids
+        )
+        again, _ = prefix.fetch_cache("again", tokens)
+        assert again.num_tokens == 40
+        prefix.release_cache("new")
+        prefix.release_cache("again")
+    finally:
+        ssd.close()
+
+
+@pytest.mark.parametrize("image", [False, True])
+def test_glm_dflash_generation_and_warm_image_prefix_match_greedy(
+    tmp_path, image, monkeypatch
+):
+    from mlx_lm.generate import BatchGenerator
+
+    from omlx.cache.paged_cache import PagedCacheManager
+    from omlx.cache.paged_ssd_cache import PagedSSDCacheManager
+    from omlx.cache.prefix_cache import BlockAwarePrefixCache
+    from omlx.cache.state import extract_cache_states
+    from omlx.models.vlm import VLMModelAdapter
+
+    target, drafter = _glm_target_and_drafter()
+    adapter = VLMModelAdapter(target)
+    assert dd.bg.apply()
+    tokens = [1, 120 if image else 2] + list(range(3, 29))
+    ids = mx.array([tokens], dtype=mx.uint32)
+    embeds = (
+        target.get_input_embeddings(
+            ids, mx.ones((4, 24)), image_grid_thw=mx.array([[1, 2, 2]])
+        ).inputs_embeds
+        if image
+        else None
+    )
+    reference_cache = target.language_model.make_cache()
+    out = target.language_model(ids, inputs_embeds=embeds, cache=reference_cache)
+    expected = []
+    for _ in range(12):
+        token = int(mx.argmax(out.logits[:, -1], axis=-1).item())
+        expected.append(token)
+        out = target.language_model(mx.array([[token]]), cache=reference_cache)
+
+    dd.attach_drafter(target.language_model, drafter)
+    rollbacks = []
+    original_rollback = target.language_model.rollback_speculative_cache
+
+    def rollback(cache, state, accepted, block_size):
+        rollbacks.append(block_size)
+        return original_rollback(cache, state, accepted, block_size)
+
+    monkeypatch.setattr(target.language_model, "rollback_speculative_cache", rollback)
+    ssd = PagedSSDCacheManager(
+        tmp_path,
+        2**24,
+        hot_cache_max_bytes=2**24,
+        hot_cache_only=True,
+        expected_model_name="glm",
+        expected_block_size=4,
+    )
+    prefix = BlockAwarePrefixCache(
+        adapter, PagedCacheManager(block_size=4, model_name="glm"), ssd
+    )
+    cache_keys = {"extra_key_ranges": [(2, ("image-a",))]} if image else {}
+    try:
+        cache = target.language_model.make_cache()
+        boundaries = {}
+        for start in range(0, len(tokens) - 1, 4):
+            end = min(start + 4, len(tokens) - 1)
+            out = adapter(
+                ids[:, start:end],
+                cache=cache,
+                **({"inputs_embeds": embeds[:, start:end]} if image else {}),
+                capture_layer_ids=[0, 1],
+                skip_lm_head=True,
+            )
+            assert out.logits is None
+            drafter.seed_request("cold", out.hidden_states, start=start)
+            states, geometry = extract_cache_states(cache)
+            mx.eval([value["state"] for value in states])
+            boundaries[end] = states
+        table = prefix.store_cache(
+            "stored",
+            tokens[:-1],
+            states,
+            model_cache_config=geometry,
+            boundary_snapshots=boundaries,
+            _store_tail_terminal=True,
+            **cache_keys,
+        )
+        assert table.num_tokens == len(tokens) - 1
+        assert drafter.store_prefix_context(
+            prefix, "cold", tokens, len(tokens) - 1, **cache_keys
+        )
+        prefix.paged_cache.release_for_eviction(table.block_ids)
+        prefix.clear_request_entry("stored")
+        for request_id in ("cold", "warm"):
+            if request_id == "warm":
+                table, suffix = prefix.fetch_cache(request_id, tokens, **cache_keys)
+                assert suffix == tokens[-1:]
+                cache = adapter.restore_cache(prefix.reconstruct_cache(table))
+                tip = prefix.paged_cache.allocated_blocks[
+                    table.block_ids[-1]
+                ].block_hash
+                assert drafter.restore_prefix_context(
+                    prefix, request_id, tip, len(tokens) - 1
+                )
+            generator = BatchGenerator(
+                adapter, max_tokens=12, sampler=lambda lp: mx.argmax(lp, -1)
+            )
+            try:
+                uid = generator.insert(
+                    [tokens[-1:]], caches=[cache], all_tokens=[list(tokens)]
+                )[0]
+                drafter.bind_uid(request_id, uid)
+                if image:
+                    adapter.set_pending_embeddings(embeds, start_offset=len(tokens) - 1)
+                got = []
+                for _ in range(48):
+                    _, responses = generator.next()
+                    got.extend(r.token for r in responses)
+                    if len(got) >= 12:
+                        break
+                assert got == expected
+            finally:
+                generator.close()
+                drafter.release_request(request_id)
+                prefix.release_cache(request_id)
+        assert 8 in rollbacks and max(rollbacks) == 8
+    finally:
+        dd.detach_drafter(target.language_model)
+        ssd.close()

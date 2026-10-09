@@ -427,9 +427,18 @@ def _patch_model_call(g5_lang: Any) -> None:
     create_attention_mask = g5_lang.create_attention_mask
     create_ssm_mask = g5_lang.create_ssm_mask
 
-    def __call__(self, inputs, cache=None, inputs_embeds=None,
-                 return_raw_hidden: bool = False, gdn_sink=None,
-                 hidden_sink=None):
+    def __call__(
+        self,
+        inputs,
+        cache=None,
+        inputs_embeds=None,
+        return_raw_hidden: bool = False,
+        gdn_sink=None,
+        hidden_sink=None,
+        capture_layer_ids=(),
+        capture_from=0,
+        layer_sink=None,
+    ):
         h = self.embed_tokens(inputs) if inputs_embeds is None else inputs_embeds
 
         if cache is None:
@@ -476,10 +485,19 @@ def _patch_model_call(g5_lang: Any) -> None:
                 h = layer(h, mask=mask, cache=c, defer=i + 1 < n_layers)
             else:
                 h = layer(h, mask=mask, cache=c)
+            if i in capture_layer_ids:
+                # Preserve the deferred HC carry for the next layer. Slice
+                # before contracting so prefill retains only the draft window.
+                captured = h.materialize() if isinstance(h, deferred_cls) else h
+                layer_sink[i] = captured[:, capture_from:].mean(axis=2)
             if pipeline is not None:
-                pipeline.push(h)
+                # Evaluate the bounded capture with its layer so its lazy
+                # mean does not pin the full prefill activation until drafting.
+                pipeline.push(h, *([layer_sink[i]] if i in capture_layer_ids else []))
             elif eval_every and (i + 1) % eval_every == 0 and i + 1 < n_layers:
-                mx.async_eval(h.arrays() if defer and isinstance(h, deferred_cls) else h)
+                mx.async_eval(
+                    h.arrays() if defer and isinstance(h, deferred_cls) else h
+                )
         if pipeline is not None:
             pipeline.drain()
 
@@ -522,6 +540,7 @@ def _patch_language_model(g5_lang: Any) -> None:
 
         original_init(self, args, config)
         self._omlx_mtp_multi_request = True
+        self._omlx_dflash_capture_from = True
 
         n_mtp = int(getattr(args, "num_nextn_predict_layers", 0) or 0)
         attach_enabled = bool(is_mtp_attach_enabled())
@@ -576,6 +595,8 @@ def _patch_language_model(g5_lang: Any) -> None:
         from mlx_vlm.models.base import LanguageModelOutput
 
         return_hidden = kwargs.pop("return_hidden", False)
+        requested = list(kwargs.pop("capture_layer_ids", None) or [])
+        capture_from = int(kwargs.pop("capture_from", 0))
         # Post-hoc rollback: the split-at-n_confirmed contract is not used on
         # this path (see _patch_linear_attention). Accept and discard, as the
         # Qwen VLM runtime does.
@@ -583,18 +604,48 @@ def _patch_language_model(g5_lang: Any) -> None:
         if inputs is None:
             inputs = kwargs.get("input_ids")
 
+        drafter = getattr(self, "_omlx_drafter", None)
+        scope = getattr(drafter, "scope_uids", None)
+        observe = (
+            not return_hidden
+            and not requested
+            and scope
+            and inputs is not None
+            and inputs.shape == (len(scope), 1)
+        )
+        if observe:
+            requested = drafter.target_layer_ids
+        if any(i < 0 or i >= len(self.model.layers) for i in requested):
+            raise ValueError("GLM DFlash capture layer is outside the backbone")
+        length = (inputs if inputs_embeds is None else inputs_embeds).shape[1]
+        if not 0 <= capture_from <= length:
+            raise ValueError("GLM DFlash capture offset is outside the input")
+        layer_sink: dict = {}
+
         if not return_hidden:
-            out = self.model(inputs, cache=cache, inputs_embeds=inputs_embeds)
+            out = self.model(
+                inputs,
+                cache=cache,
+                inputs_embeds=inputs_embeds,
+                capture_layer_ids=set(requested),
+                capture_from=capture_from,
+                layer_sink=layer_sink,
+            )
+            captured = [layer_sink[i] for i in requested]
+            if observe:
+                drafter.observe(scope, captured)
             if inputs_embeds is None and prompt_priming.capture_eligible(self, cache):
                 prompt_priming.maybe_capture(self, inputs, out, cache)
             nlk = kwargs.get("num_logits_to_keep", 0)
             if nlk:
                 out = out[:, -nlk:, :]
+            if kwargs.get("skip_logits", False):
+                return LanguageModelOutput(logits=None, hidden_states=captured or None)
             if self.args.tie_word_embeddings:
                 logits = self.model.embed_tokens.as_linear(out)
             else:
                 logits = g5_lang.linear_forward(self.lm_head, out)
-            return LanguageModelOutput(logits=logits)
+            return LanguageModelOutput(logits=logits, hidden_states=captured or None)
 
         # MTP verify forward. Returning gdn_states is what routes
         # batch_generator._call_backbone onto the mlx-vlm rollback path
@@ -603,8 +654,14 @@ def _patch_language_model(g5_lang: Any) -> None:
         gdn_sink: list = []
         hidden_sink: list = []
         out = self.model(
-            inputs, cache=cache, inputs_embeds=inputs_embeds,
-            gdn_sink=gdn_sink, hidden_sink=hidden_sink,
+            inputs,
+            cache=cache,
+            inputs_embeds=inputs_embeds,
+            gdn_sink=gdn_sink,
+            hidden_sink=hidden_sink,
+            capture_layer_ids=set(requested),
+            capture_from=capture_from,
+            layer_sink=layer_sink,
         )
         if self.args.tie_word_embeddings:
             logits = self.model.embed_tokens.as_linear(out)
@@ -612,7 +669,7 @@ def _patch_language_model(g5_lang: Any) -> None:
             logits = g5_lang.linear_forward(self.lm_head, out)
         return LanguageModelOutput(
             logits=logits,
-            hidden_states=hidden_sink,
+            hidden_states=[layer_sink[i] for i in requested] + hidden_sink,
             gdn_states=gdn_sink,
             shared_kv_states={},
         )

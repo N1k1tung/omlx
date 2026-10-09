@@ -5196,22 +5196,36 @@ class Scheduler:
         """Request drafter layer captures for the chunk's tail inside the window.
 
         Returns the chunk-local offset of the first position to keep, or None
-        when the chunk ends before the drafter's context window starts. The
-        window covers the prompt's last tokens; the last prompt token itself
-        is captured by the ordinary decode step after insert.
+        when the chunk ends before the drafter's context window starts. With
+        prefix caching each chunk retains its trailing window for publication;
+        otherwise only the final prompt window is needed. Ordinary decode
+        captures the last prompt token.
         """
+
         drafter = _block_drafter_for(self.model)
         # The VLM adapter's _omlx_prefill is a bound method that forwards to
         # the same model; other prefill hooks cannot return layer captures.
         prefill_owner = getattr(prefill_model, "__self__", prefill_model)
         if drafter is None or prefill_owner is not self.model:
             return None
-        keep_from = len(request.prompt_token_ids) - drafter.window
         end = start + n_tokens
+        # Each publishable cache boundary needs its own draft window, even
+        # when it precedes the final prompt window.
+        keep_from = (
+            end - drafter.ring_slots
+            if getattr(self, "block_aware_cache", None) is not None
+            and not getattr(request, "skip_cache_store", False)
+            else len(request.prompt_token_ids) - drafter.window
+        )
         if end <= keep_from:
             return None
         model_kwargs["capture_layer_ids"] = list(drafter.target_layer_ids)
-        return max(0, keep_from - start)
+        keep = max(0, keep_from - start)
+        host = getattr(self.model, "_language_model", self.model)
+        if getattr(host, "_omlx_dflash_capture_from", False):
+            model_kwargs["capture_from"] = keep
+        request._dflash_capture_start = start + keep
+        return 0 if "capture_from" in model_kwargs else keep
 
     def _dflash_seed_prefill(
         self, request: "Request", output: Any, keep_from: int
@@ -5221,8 +5235,66 @@ class Scheduler:
         if drafter is None or not hidden:
             return
         drafter.seed_request(
-            request.request_id, [layer[:, keep_from:] for layer in hidden]
+            request.request_id,
+            [layer[:, keep_from:] for layer in hidden],
+            start=getattr(request, "_dflash_capture_start", None),
         )
+
+    def _dflash_store_prefix_context(
+        self, request: "Request", token_count: int
+    ) -> None:
+        drafter = _block_drafter_for(self.model)
+        if drafter is None or getattr(request, "skip_cache_store", False):
+            return
+        try:
+            uid = self.request_id_to_uid.get(request.request_id)
+            drafter.store_prefix_context(
+                self.block_aware_cache,
+                request.request_id,
+                request.prompt_token_ids + request.output_token_ids,
+                token_count,
+                uid=uid if uid in drafter._rows else None,
+                extra_keys=request.vlm_extra_keys_for_cache,
+                extra_key_token_start=request.vlm_extra_key_token_start_for_cache,
+                extra_key_ranges=request.vlm_extra_key_ranges_for_cache,
+            )
+        except Exception as exc:
+            logger.debug("DFlash prefix context publication failed: %s", exc)
+
+    def _dflash_restore_prefix_context(self, request: "Request", block_table) -> bool:
+        drafter = _block_drafter_for(self.model)
+        if drafter is None or not block_table or not block_table.block_ids:
+            return False
+        block = self.paged_cache_manager.allocated_blocks[block_table.block_ids[-1]]
+        try:
+            return drafter.restore_prefix_context(
+                self.block_aware_cache,
+                request.request_id,
+                block.block_hash,
+                block_table.num_tokens,
+            )
+        except Exception as exc:
+            logger.debug("DFlash prefix context restoration failed: %s", exc)
+            return False
+
+    def _dflash_prepare_prefix_context(self, request: "Request", block_table) -> bool:
+        """Restore draft history or rewind only enough KV to rebuild it."""
+        drafter = _block_drafter_for(self.model)
+        if drafter is None or not block_table or block_table.num_tokens <= 0:
+            return False
+        if self._dflash_restore_prefix_context(request, block_table):
+            return False
+        cutoff = max(0, block_table.num_tokens - drafter.ring_slots)
+        while block_table.block_ids and block_table.num_tokens > cutoff:
+            bid = block_table.block_ids.pop()
+            block = self.paged_cache_manager.allocated_blocks[bid]
+            block_table.num_tokens -= (
+                block.token_count or self.config.paged_cache_block_size
+            )
+            self.paged_cache_manager.release_for_eviction([bid])
+        if block_table.block_ids:
+            self._dflash_restore_prefix_context(request, block_table)
+        return True
 
     def _dflash_bind_uid(self, request_id: str, uid: int) -> None:
         drafter = _block_drafter_for(self.model)
@@ -7969,6 +8041,9 @@ class Scheduler:
 
         self._boundary_snapshot_required = True
         self._enable_mtp_boundary_alignment()
+        request = self.requests.get(request_id)
+        if request is not None:
+            self._dflash_store_prefix_context(request, token_count)
         self._boundary_snapshot_diagnostics.record(
             "capture_success",
             request_id=request_id,
@@ -8385,6 +8460,7 @@ class Scheduler:
             )
             storage = "memory"
 
+        self._dflash_store_prefix_context(request, total_tokens)
         self._boundary_snapshot_diagnostics.record(
             "capture_success",
             request_id=request.request_id,
@@ -9423,7 +9499,7 @@ class Scheduler:
             # Exact-hit generation needs N-1 state, which Arrays/GDN cannot
             # produce by trimming one token. Re-prefill only the final block.
             if (
-                self._gdn_split_active()
+                (self._gdn_split_active() or _block_drafter_for(self.model) is not None)
                 and block_table is not None
                 and block_table.block_ids
                 and block_table.num_tokens >= len(request.prompt_token_ids)
@@ -9441,7 +9517,9 @@ class Scheduler:
                 block_table.num_tokens = max(
                     0, block_table.num_tokens - last_token_count
                 )
-                self.paged_cache_manager.free_block(last_block_id)
+                self.paged_cache_manager.release_for_eviction([last_block_id])
+            drafter = _block_drafter_for(self.model)
+            self._dflash_prepare_prefix_context(request, block_table)
             if block_table and 0 < block_table.num_tokens < minimum_prefix:
                 logger.info(
                     "Request %s: cached prefix %d precedes complete image prefix %d",
@@ -9481,6 +9559,16 @@ class Scheduler:
                             block_table
                         )
                 reconstruct_ms = (time.perf_counter() - reconstruct_started) * 1000.0
+                if drafter is not None and block_table.num_tokens != original_tokens:
+                    drafter.release_request(request.request_id)
+                    if self._dflash_prepare_prefix_context(request, block_table):
+                        reconstructed = (
+                            self.block_aware_cache.reconstruct_cache(
+                                block_table, promote_to_hot_cache=not bypass_hot_cache
+                            )
+                            if block_table.block_ids
+                            else None
+                        )
                 if block_table.num_tokens < minimum_prefix:
                     reconstructed = None
                 if reconstructed:
@@ -9595,6 +9683,11 @@ class Scheduler:
         else:
             # No paged SSD cache configured - process all tokens
             request.remaining_tokens = request.prompt_token_ids
+
+        if request.cached_tokens == 0:
+            drafter = _block_drafter_for(self.model)
+            if drafter is not None:
+                drafter.release_request(request.request_id)
 
         # Lightning-MTP has a small prompt-history cache separate from the
         # backbone KV restored above.  Bind an exact cache-boundary sidecar (when

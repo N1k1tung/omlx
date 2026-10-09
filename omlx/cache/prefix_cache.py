@@ -5308,29 +5308,34 @@ class BlockAwarePrefixCache(CacheManager):
         extra_keys: tuple[Any, ...] | None = None,
         extra_key_token_start: int | None = None,
         extra_key_ranges: list[tuple[int, tuple[Any, ...]]] | None = None,
+        start_tokens: int = 0,
+        parent_hash: BlockHash | None = None,
     ) -> bytes | None:
         """Return the backbone chain hash, including a terminal tail, for an MTP sidecar.
 
-        VLM requests can change hidden states without changing token ids.  The
-        generic prefix cache supports per-range media keys, but
-        ``compute_chain_hashes`` cannot reproduce that resolution from a lone
-        boundary snapshot.  Fail closed for those two complex forms; text-only
-        requests and a single request-wide ``extra_keys`` tuple remain exact.
+        Resolve media keys exactly as store_cache does. Callers publishing
+        successive full-block boundaries may extend their previous chain tip.
         """
         boundary_tokens = int(boundary_tokens)
         if (
             boundary_tokens <= 0
             or boundary_tokens > len(tokens)
-            or extra_key_token_start is not None
-            or extra_key_ranges is not None
+            or start_tokens < 0
+            or start_tokens > boundary_tokens
+            or start_tokens % self.block_size
         ):
             return None
-        parent_hash: BlockHash | None = None
-        for start in range(0, boundary_tokens, self.block_size):
+        for start in range(start_tokens, boundary_tokens, self.block_size):
+            end = min(start + self.block_size, boundary_tokens)
             parent_hash = compute_block_hash(
                 parent_hash,
-                tokens[start : min(start + self.block_size, boundary_tokens)],
-                extra_keys=extra_keys,
+                tokens[start:end],
+                extra_keys=resolve_block_extra_keys(
+                    end,
+                    extra_keys=extra_keys,
+                    extra_key_token_start=extra_key_token_start,
+                    extra_key_ranges=extra_key_ranges,
+                ),
                 model_name=self.paged_cache.model_name,
             )
         return parent_hash
