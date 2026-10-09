@@ -18,7 +18,6 @@ from ..deepseek_v4.hyper_connection import hc_expand as _hc_expand
 from ..fast_ops import exact_hc_norm
 from ..linear import DECODE_BLOCK_SIZE
 from mlx_lm.models.mla import MultiLinear
-from omlx.custom_kernels.nax import is_nax_available
 from omlx.patches import glm53_kda_prework
 from omlx.patches.mlx_vlm_glm5_next_compat import decode_kernels as _decode_kernels
 from omlx.patches.deepseek_v4.switch_layers import SwitchGLU, _sort_threshold
@@ -65,8 +64,8 @@ def _cache_parts(cache):
 # Single-sequence decode (L == 1) and short verify blocks (L <= 8, the
 # DECODE_BLOCK_SIZE of the shared HC helpers) run fused kernels that
 # reproduce the reference op graph bit for bit; see decode_kernels.py.
-# They are validated on M5 (NAX) GPUs and used there.
-_DECODE_FUSION = is_nax_available()
+# They run on M3 and newer GPUs (decode_kernels.fused_decode_supported).
+_DECODE_FUSION = _decode_kernels.fused_decode_supported()
 _DECODE_BLOCK = 8
 
 # Decode and short verification start evaluating every this many layers.
@@ -1470,9 +1469,8 @@ class Glm5NextSparseAttention(nn.Module):
         B, H, L, _ = q.shape
         dim = kv_latent.shape[-1]
         q_embedded = self.embed_q(q)
-        # The indexer already excludes future keys. NAX reads selected latent
-        # rows directly, avoiding a [B, L, TOPK, dim] gather for verification.
-        # Keep FP32 inputs on the fallback instead of downcasting them.
+        # NAX reads the selected latent rows in place (the indexer already
+        # excludes future keys); FP32 and batched inputs take the gather path.
         output = sparse_mla_attention_nax(
             q_embedded, kv_latent, topk_indices, self.scale
         )
@@ -1917,7 +1915,11 @@ class Glm5NextModel(nn.Module):
         # Decode/verify: start encoding the step every few layers while the
         # rest of the graph is still being built (scheduling only, see
         # _DECODE_EVAL_EVERY).
-        eval_every = _DECODE_EVAL_EVERY if h.shape[0] == 1 and h.shape[1] <= _DECODE_BLOCK else 0
+        eval_every = (
+            _DECODE_EVAL_EVERY
+            if h.shape[0] == 1 and h.shape[1] <= _DECODE_BLOCK
+            else 0
+        )
         n_layers = len(self.layers)
         # One token: each layer's last HC expand runs inside the next layer's
         # first HC pre (see _decode_hc_pre_deferred); the last one here.

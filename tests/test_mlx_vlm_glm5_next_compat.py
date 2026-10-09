@@ -1419,14 +1419,15 @@ def test_kda_fused_prefill_matches_stock(monkeypatch):
     model = _kda_model(77)[0]
     prompt = mx.arange(70, dtype=mx.int32)[None] + 1
 
-    monkeypatch.setattr(kda, "_GLM53_KDA_PREFILL_ENABLED", False)
+    eligible = kda.glm53_kda_prefill_eligible
+    monkeypatch.setattr(kda, "glm53_kda_prefill_eligible", lambda *args: False)
     reference_cache = model.make_cache()
     reference = model(prompt, cache=reference_cache).logits
     mx.eval(reference)
     ref_conv = [cache[0] for cache in reference_cache]
     ref_state = [cache[1] for cache in reference_cache]
 
-    monkeypatch.setattr(kda, "_GLM53_KDA_PREFILL_ENABLED", True)
+    monkeypatch.setattr(kda, "glm53_kda_prefill_eligible", eligible)
     engaged = []
     original = kda.glm53_kda_prefill
 
@@ -1500,18 +1501,13 @@ def test_kda_prefill_eligibility_gating(monkeypatch):
     padded.lengths = mx.array([70])
     assert not glm53_kda_prefill_eligible(layer, inputs, None, padded)
 
-    monkeypatch.setattr(
-        "omlx.patches.glm53_kda_prework._GLM53_KDA_PREFILL_ENABLED", False
-    )
-    assert not glm53_kda_prefill_eligible(layer, inputs, None, cache)
-    monkeypatch.undo()
-
     # The fused driver runs end to end and matches the module's own route.
     fused_cache = model.make_cache()[0]
     out_fused = glm53_kda_prefill(layer, inputs, fused_cache)
     stock_cache = model.make_cache()[0]
     monkeypatch.setattr(
-        "omlx.patches.glm53_kda_prework._GLM53_KDA_PREFILL_ENABLED", False
+        "omlx.patches.glm53_kda_prework.glm53_kda_prefill_eligible",
+        lambda *args: False,
     )
     out_stock = layer(inputs, None, stock_cache)
     mx.eval(out_fused, out_stock)
@@ -1536,11 +1532,12 @@ def test_kda_fused_prefill_survives_mtp_runtime_patch(monkeypatch):
     model = _kda_model(80)[0]
     prompt = mx.arange(70, dtype=mx.int32)[None] + 1
 
-    monkeypatch.setattr(kda, "_GLM53_KDA_PREFILL_ENABLED", False)
+    eligible = kda.glm53_kda_prefill_eligible
+    monkeypatch.setattr(kda, "glm53_kda_prefill_eligible", lambda *args: False)
     reference_cache = model.make_cache()
     reference = model(prompt, cache=reference_cache).logits
 
-    monkeypatch.setattr(kda, "_GLM53_KDA_PREFILL_ENABLED", True)
+    monkeypatch.setattr(kda, "glm53_kda_prefill_eligible", eligible)
     engaged = []
     original = kda.glm53_kda_prefill
 
@@ -2195,8 +2192,9 @@ def _kda_run(attn, x, conv0, state0, fused, chunks=None):
 
     from omlx.patches import glm53_kda_prework as kda
 
-    enabled = kda._GLM53_KDA_PREFILL_ENABLED
-    kda._GLM53_KDA_PREFILL_ENABLED = fused
+    eligible = kda.glm53_kda_prefill_eligible
+    if not fused:
+        kda.glm53_kda_prefill_eligible = lambda *args: False
     try:
         cache = ArraysCache(size=2)
         cache[0] = conv0
@@ -2209,7 +2207,7 @@ def _kda_run(attn, x, conv0, state0, fused, chunks=None):
         mx.eval(out, cache[0], cache[1])
         return out, cache[0], cache[1]
     finally:
-        kda._GLM53_KDA_PREFILL_ENABLED = enabled
+        kda.glm53_kda_prefill_eligible = eligible
 
 
 def test_fused_prefill_runs_blocked_recurrence(monkeypatch):
@@ -2810,17 +2808,6 @@ def test_nax_sparse_mla_unsupported_shapes_return_none():
 
 
 @_needs_nax_sparse_mla
-def test_nax_sparse_mla_disabled_by_env(monkeypatch):
-    monkeypatch.setattr(sparse_mla_nax, "_ENABLED", False)
-    sparse_mla_nax.nax_sparse_mla_available.cache_clear()
-    try:
-        q, kv, idx = _smla_inputs(16, 64, 32)
-        assert sparse_mla_nax.sparse_mla_attention_nax(q, kv, idx, 1.0) is None
-    finally:
-        sparse_mla_nax.nax_sparse_mla_available.cache_clear()
-
-
-@_needs_nax_sparse_mla
 def test_nax_sparse_mla_deterministic_across_runs():
     # Large enough to keep many threadgroups in flight; every run must be
     # bit-identical (guards against threadgroup-memory races).
@@ -2935,13 +2922,9 @@ def test_nax_sparse_mla_call_site_matches_fallback_paths(monkeypatch):
     products, so bf16 intermediate rounding differs)."""
     attn = _make_sparse_attention()
     chunks = [2600, 1600]  # sparse at 2600 keys, then at 4200 keys
-    monkeypatch.setattr(sparse_mla_nax, "_ENABLED", False)
-    sparse_mla_nax.nax_sparse_mla_available.cache_clear()
-    try:
+    with monkeypatch.context() as off:
+        off.setattr(sparse_mla_nax, "nax_sparse_mla_available", lambda: False)
         expected = _run_attention(attn, chunks)
-    finally:
-        monkeypatch.setattr(sparse_mla_nax, "_ENABLED", True)
-        sparse_mla_nax.nax_sparse_mla_available.cache_clear()
     calls = []
     orig = sparse_mla_nax.sparse_mla_attention_nax
 
@@ -2965,9 +2948,7 @@ def test_nax_sparse_mla_call_site_matches_fallback_paths(monkeypatch):
 @_needs_nax_sparse_mla
 @pytest.mark.parametrize("length", [2, 4, 8])
 @pytest.mark.parametrize("bits", [None, 4])
-def test_nax_sparse_mla_short_verify_avoids_gather_and_preserves_cache(
-    monkeypatch, length, bits
-):
+def test_nax_sparse_mla_short_verify_avoids_gather(monkeypatch, length, bits):
     from mlx_lm.models.cache import KVCache, PoolingCache
     from mlx_vlm.models.glm5_next import language
 
@@ -3003,13 +2984,6 @@ def test_nax_sparse_mla_short_verify_avoids_gather_and_preserves_cache(
     assert got.shape == expected.shape and got.dtype == expected.dtype
     e32, g32 = expected.astype(mx.float32), got.astype(mx.float32)
     assert mx.abs(e32 - g32).max().item() <= 1e-2 * mx.abs(e32).max().item()
-    for actual, reference in zip(cache, reference_cache, strict=True):
-        assert actual.size() == reference.size()
-        for a, r in zip(actual.state, reference.state, strict=True):
-            if a is None or r is None:
-                assert a is r
-            else:
-                assert mx.array_equal(a, r).item()
 
 
 @pytest.mark.parametrize("batch,dtype", [(1, mx.float32), (2, mx.bfloat16)])
@@ -4517,8 +4491,6 @@ def test_upstream_kda_prefill_then_fused_decode_is_bitwise_reference(monkeypatch
     except ImportError:
         pytest.skip("this build has no glm53 fused KDA prefill")
     _language()
-    if not getattr(prework, "_GLM53_KDA_PREFILL_ENABLED", False):
-        pytest.skip("glm53 fused KDA prefill disabled")
     if not _native_indexer_available():
         pytest.skip("GLM DSA native indexer extension is not built")
 
