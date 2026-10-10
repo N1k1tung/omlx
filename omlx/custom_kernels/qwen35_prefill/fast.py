@@ -1257,15 +1257,18 @@ def qwen35_oq_a8_linear(
     stream=None,
 ) -> mx.array:
     """Convenience Stage-A + GEMM for a projection with no shared activation."""
-    stage = qwen35_oq_a8_stage_a_natural if bits == 8 else qwen35_oq_a8_stage_a_v8
-    qa, sa, ra = stage(x, act_mode, stream=stream)
+    if bits == 8:
+        qa, sa, ra = qwen35_oq_a8_stage_a_natural(x, act_mode, stream=stream)
+    else:
+        qa, sa, ra = qwen35_oq_a8_stage_a_v8(x, act_mode, stream=stream)
+        scales, biases = mx.contiguous(scales.T), mx.contiguous(biases.T)
     return qwen35_oq_a8_qmm_t(
         qa,
         sa,
         ra,
         weight,
-        mx.contiguous(scales.T),
-        mx.contiguous(biases.T),
+        scales,
+        biases,
         bits,
         act_mode,
         variant,

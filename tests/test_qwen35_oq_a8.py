@@ -1032,17 +1032,7 @@ def test_q8_gemm_matches_affine_reference(dtype, act_mode, m):
 
     qa, sa, ra = fast.qwen35_oq_a8_quantize(x, act_mode)
     qa8, sa8, ra8 = fast.qwen35_oq_a8_stage_a_natural(x, act_mode)
-    got = fast.qwen35_oq_a8_qmm_t(
-        qa8,
-        sa8,
-        ra8,
-        packed,
-        mx.contiguous(scales.T),
-        mx.contiguous(biases.T),
-        8,
-        act_mode,
-        806,
-    )
+    got = fast.qwen35_oq_a8_qmm_t(qa8, sa8, ra8, packed, scales, biases, 8, act_mode)
     mx.eval(qa, sa, ra, got)
 
     expected = affine_reference(
@@ -1078,36 +1068,71 @@ def test_stage_a_natural_keeps_k_order(act_mode):
 
 
 @requires_kernels
-@pytest.mark.parametrize("variant", [802, 805, 806])
-def test_q8_tiles_agree(variant):
+@pytest.mark.parametrize("act_mode", [0, 1])
+def test_q8_tiles_and_token_paths_agree(act_mode):
+    """Rows are independent, so both tiles and both Ra/Sa load paths agree."""
     fast = _kernels()
-    m, k, n = 96, 256, 128
+    k, n = 256, 128
     packed, scales, biases = make_quantized(n, k, 8, seed=5)
-    rng = np.random.default_rng(5)
-    x = mx.array((rng.standard_normal((m, k)) * 0.5).astype(np.float32), mx.float16)
-    qa, sa, ra = fast.qwen35_oq_a8_stage_a_natural(x, 0)
-    sc_t, bi_t = mx.contiguous(scales.T), mx.contiguous(biases.T)
+    rows = np.random.default_rng(5).standard_normal((1028, k)).astype(np.float32)
 
-    base = fast.qwen35_oq_a8_qmm_t(qa, sa, ra, packed, sc_t, bi_t, 8, 0, 800)
-    got = fast.qwen35_oq_a8_qmm_t(qa, sa, ra, packed, sc_t, bi_t, 8, 0, variant)
-    mx.eval(base, got)
-    np.testing.assert_array_equal(
-        np.array(got.astype(mx.float32)), np.array(base.astype(mx.float32))
-    )
+    def run(m):
+        x = mx.array(rows[:m] * 0.5, mx.float16)
+        qa, sa, ra = fast.qwen35_oq_a8_stage_a_natural(x, act_mode)
+        y = fast.qwen35_oq_a8_qmm_t(qa, sa, ra, packed, scales, biases, 8, act_mode)
+        return np.array(y.astype(mx.float32)).view(np.uint32)
+
+    narrow = run(1028)  # (1,2) tile, vector Ra/Sa loads
+    np.testing.assert_array_equal(run(1027), narrow[:1027])  # scalar loads
+    np.testing.assert_array_equal(run(1024), narrow[:1024])  # (2,2) tile
+    np.testing.assert_array_equal(run(130), narrow[:130])  # (2,2), scalar
 
 
 @requires_kernels
-def test_q8_has_no_persistent_weight_copy():
-    """Packed bytes are read in place; only the metadata is transposed."""
+def test_q8_rejects_group_major_metadata():
+    """Q8 metadata is [N, K/64]; a transposed copy is a shape error."""
+    fast = _kernels()
+    packed, scales, biases = make_quantized(128, 256, 8)
+    qa, sa, ra = fast.qwen35_oq_a8_stage_a_natural(mx.zeros((64, 256), mx.float16), 0)
+    with pytest.raises(ValueError, match="incompatible"):
+        fast.qwen35_oq_a8_qmm_t(
+            qa, sa, ra, packed, mx.contiguous(scales.T), mx.contiguous(biases.T), 8
+        )
+
+
+@pytest.mark.parametrize("bits", [4, 5, 8])
+def test_apply_plan_metadata_layout(monkeypatch, bits):
+    """Q8 gets the layer's own [N, K/64] arrays; Q4/Q5 a cached [K/64, N] copy."""
+    from omlx.custom_kernels.qwen35_prefill import fast
     from omlx.patches import qwen35_oq_a8 as dispatch
 
-    linear = _quantized_linear(512, 128, 8)
+    calls = []
+    monkeypatch.setattr(fast, "oq_a8_available", lambda: True)
+    monkeypatch.setattr(
+        fast,
+        "qwen35_oq_a8_qmm_t",
+        lambda qa, sa, ra, w, s, b, *args, **kwargs: calls.append((w, s, b)),
+    )
+    linear = _quantized_linear(256, 128, bits)
     plan = dispatch.classify_linear(linear)
-    assert plan is not None and plan.layout == dispatch._LAYOUT_NATURAL
-    weight, scales, biases = dispatch._prepared_weights(linear)
+    stage = dispatch.StageA(
+        qa=mx.zeros((4, 256), mx.int8),
+        sa=mx.zeros((4,), mx.float32),
+        ra=mx.zeros((4, 4), mx.int16),
+        act_mode=plan.act_mode,
+        layout=plan.layout,
+    )
+    dispatch.apply_plan(linear, stage, plan)
+
+    weight, scales, biases = calls[0]
+    cached = getattr(linear, dispatch._PREPARED_ATTR, None)
     assert weight is linear.weight
-    np.testing.assert_array_equal(np.array(scales), np.array(linear.scales).T)
-    np.testing.assert_array_equal(np.array(biases), np.array(linear.biases).T)
+    if bits == 8:
+        assert scales is linear.scales and biases is linear.biases
+        assert cached is None
+    else:
+        assert scales.shape == biases.shape == (256 // GROUP_SIZE, 128)
+        assert cached is not None
 
 
 def _stage_a_counter(monkeypatch, dispatch):
