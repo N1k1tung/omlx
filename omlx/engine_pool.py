@@ -3927,6 +3927,7 @@ class EnginePool:
                         path,
                         engine.vlm_model,
                         block_size=getattr(model_settings, "dflash_block_size", None),
+                        verify_mode=getattr(model_settings, "dflash_verify_mode", None),
                         quant_enabled=bool(
                             getattr(model_settings, "dflash_draft_quant_enabled", False)
                         ),
@@ -3956,7 +3957,6 @@ class EnginePool:
                     ignored = [
                         name
                         for name, default in (
-                            ("dflash_verify_mode", None),
                             ("dflash_max_ctx", None),
                             ("dflash_draft_window_size", None),
                             ("dflash_draft_sink_size", 0),

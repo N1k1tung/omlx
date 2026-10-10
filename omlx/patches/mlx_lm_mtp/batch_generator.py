@@ -3218,8 +3218,8 @@ def _post_init_mtp(gen_batch: Any, *, verify_result=None, priming_offset=None) -
         state.depth = depth
         state.head_clone = head_clone
         if drafter is not None:
-            # Block drafters keep their own per-request context and draft a
-            # fixed block, so neither the head cache nor the depth
+            # Block drafters keep their own per-request context and block
+            # policy, so neither the head cache nor the native depth
             # controller applies. The captured hidden of main_tok is the
             # newest context entry; next_main is the anchor.
             state.mtp_cache = []
@@ -4344,6 +4344,22 @@ def _run_verify_cycle_chain(
         ):
             raise _MtpStepFallback("cache layer rejects chain rollback")
         state.stats.cache_ops_ms += (time.perf_counter() - t0) * 1000 + shared_commit_ms
+        record_cycle = getattr(drafter, "record_cycle", None)
+        if record_cycle is not None:
+            record_cycle(
+                state.uid,
+                k + 1,
+                m,
+                int(
+                    (
+                        accept_ms
+                        + (time.perf_counter() - finish_t0) * 1000
+                        + verify_ms
+                        + shared_commit_ms
+                    )
+                    * 1_000_000
+                ),
+            )
         if not draft_first:
             draft_next()
         if materialize_boundary_emit:

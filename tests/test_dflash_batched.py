@@ -71,9 +71,11 @@ def _tiny_target():
     return SimpleNamespace(language_model=language)
 
 
-def _tiny_drafter(seed=0):
+def _tiny_drafter(seed=0, block_size=BLOCK, verify_mode=None):
     mx.random.seed(seed)
-    model = DFlash2DraftModel(_tiny_config())
+    config = _tiny_config()
+    config.block_size = block_size
+    model = DFlash2DraftModel(config)
     # Random weights in float32 so both forwards share tight numerics.
     params = {
         key: mx.random.normal(value.shape) * 0.2
@@ -82,7 +84,9 @@ def _tiny_drafter(seed=0):
     model.load_weights(list(params.items()), strict=False)
     model.bind(_tiny_target())
     mx.eval(model.parameters())
-    return dd.DFlashDrafter(model, block_size=BLOCK, source_path="tiny")
+    return dd.DFlashDrafter(
+        model, block_size=block_size, source_path="tiny", verify_mode=verify_mode
+    )
 
 
 def _captured(n, seed):
@@ -144,7 +148,87 @@ def test_batched_forward_matches_rows_drafted_alone():
     assert batched.context_length(2) == sum(rows[2][0] for rows in plan if 2 in rows)
 
 
-def test_predraft_adopt_matches_drafting_committed_rows():
+def test_adaptive_blocks_are_per_request_and_resize_the_forward(monkeypatch):
+    drafter = _tiny_drafter(block_size=8)
+    widths = []
+    embed = drafter.model._embed_input_tokens
+
+    def observed_embed(inputs):
+        widths.append(tuple(inputs.shape))
+        return embed(inputs)
+
+    monkeypatch.setattr(drafter.model, "_embed_input_tokens", observed_embed)
+    _run_cycles(drafter, [{0: (5, 3), 1: (5, 9)}])
+    assert drafter._rows[0].policy is not drafter._rows[1].policy
+    for _ in range(4):
+        drafter.record_cycle(0, 8, 0, 2_000_000)
+    assert drafter.block_limit(0) == 4 and drafter.block_limit(1) == 8
+    got = _run_cycles(drafter, [{0: (2, 11), 1: (3, 4)}], cycle_offset=1)[0]
+    assert len(got[0]) == 3 and len(got[1]) == 7
+    assert widths == [(2, 8), (1, 4), (1, 8)]
+    # Splitting the cohort by width retains each row's ring and projections.
+    for uid in (0, 1):
+        alone = _tiny_drafter(block_size=8)
+        _run_cycles(alone, [{uid: (5, 3 if uid == 0 else 9)}])
+        if uid == 0:
+            for _ in range(4):
+                alone.record_cycle(uid, 8, 0, 2_000_000)
+        expected = _run_cycles(
+            alone, [{uid: (2, 11) if uid == 0 else (3, 4)}], cycle_offset=1
+        )[0][uid]
+        assert got[uid] == expected
+        assert drafter.context_length(uid) == alone.context_length(uid)
+    # The native policy probes back up once reduced blocks accept well.
+    for _ in range(16):
+        drafter.record_cycle(0, 4, 3, 2_000_000)
+    assert drafter.block_limit(0) == 8
+    for _ in range(4):
+        drafter.record_cycle(0, 8, 7, 2_000_000)
+    assert drafter._rows[0].policy.mode == "full"
+    drafter._row(2).fed = 32768
+    assert drafter.block_limit(2) == 4
+    drafter.release([0])
+    assert drafter.block_limit(0) == 8  # A new request starts with a new policy.
+    fixed = _tiny_drafter(block_size=8, verify_mode="dflash")
+    assert fixed.block_limit(0, prompt_len=32768) == 8
+
+
+@pytest.mark.parametrize("expand", [False, True])
+def test_adaptive_draft_waits_for_policy_update(expand, monkeypatch):
+    drafter, plain = _tiny_drafter(block_size=8), _tiny_drafter(block_size=8)
+    for d in (drafter, plain):
+        _run_cycles(d, [{0: (3, 5)}])
+        if expand:
+            for _ in range(4):
+                d.record_cycle(0, 8, 0, 2_000_000)
+    state = SimpleNamespace(uid=0)
+    captured = _captured(4 if expand else 8, seed=90)
+    widths = []
+    embed = drafter.model._embed_input_tokens
+
+    def observed_embed(inputs):
+        widths.append(int(inputs.shape[1]))
+        return embed(inputs)
+
+    monkeypatch.setattr(drafter.model, "_embed_input_tokens", observed_embed)
+    assert not drafter.predraft(None, state, captured, mx.array([1]), mx.array([7]))
+    assert widths == [] and drafter._predraft is None
+    for d in (drafter, plain):
+        for _ in range(16 if expand else 4):
+            d.record_cycle(0, 4 if expand else 8, 3 if expand else 0, 2_000_000)
+    assert drafter.context_length(0) == plain.context_length(0) == 3
+    for d in (drafter, plain):
+        d.draft([(None, state, [c[:, :1] for c in captured], mx.array([7]), None)])
+        if d is drafter:
+            got = state.drafts.tolist()
+    assert got == state.drafts.tolist()
+    assert len(got) == (7 if expand else 3)
+    assert widths == [8 if expand else 4]
+    assert drafter.context_length(0) == plain.context_length(0) == 4
+
+
+@pytest.mark.parametrize("block_size, verify_mode", [(BLOCK, None), (8, "dflash")])
+def test_predraft_adopt_matches_drafting_committed_rows(block_size, verify_mode):
     """A predraft over every verify row equals drafting the committed rows, and
     a discarded one leaves the ring as it was, across ring wrap-around."""
 
@@ -162,7 +246,7 @@ def test_predraft_adopt_matches_drafting_committed_rows():
                 None, state, captured, mx.array([count - 1]) + 1, mx.array([anchor])
             )
             if mode == "adopt":
-                drafter.adopt_predraft(state, count)
+                assert drafter.adopt_predraft(state, count) is None
             else:
                 drafter.discard_predraft()
                 committed = mx.array([anchor], dtype=mx.uint32)
@@ -173,7 +257,10 @@ def test_predraft_adopt_matches_drafting_committed_rows():
 
     counts = [2, 4, 1, 4, 3, 2, 4, 1]
     for mode in ("adopt", "discard"):
-        plain, other = _tiny_drafter(), _tiny_drafter()
+        plain, other = (
+            _tiny_drafter(block_size=block_size, verify_mode=verify_mode)
+            for _ in range(2)
+        )
         for d in (plain, other):
             d.seed(0, _captured(WINDOW - 3, seed=77))
             d.draft(
@@ -498,7 +585,7 @@ def test_prefix_context_restores_ring_pending_and_same_drafts(
         ssd.close()
 
 
-def _glm_target_and_drafter():
+def _glm_target_and_drafter(verify_mode=None):
     from omlx.patches.mlx_vlm_mtp import glm5_next_vlm_runtime
     from tests.test_mlx_vlm_glm5_next_compat import _tiny_config as glm_config
 
@@ -523,7 +610,9 @@ def _glm_target_and_drafter():
     model = DFlash2DraftModel(config)
     model.bind(target)
     mx.eval(target.parameters(), model.parameters())
-    return target, dd.DFlashDrafter(model, block_size=16, source_path="tiny-glm")
+    return target, dd.DFlashDrafter(
+        model, block_size=16, source_path="tiny-glm", verify_mode=verify_mode
+    )
 
 
 @pytest.mark.parametrize("length", [5, 260])
@@ -620,8 +709,9 @@ def test_missing_draft_sidecar_replays_only_a_window_and_preserves_blocks(tmp_pa
 
 
 @pytest.mark.parametrize("image", [False, True])
+@pytest.mark.parametrize("verify_mode", ["dflash", "adaptive"])
 def test_glm_dflash_generation_and_warm_image_prefix_match_greedy(
-    tmp_path, image, monkeypatch
+    tmp_path, image, verify_mode, monkeypatch
 ):
     from mlx_lm.generate import BatchGenerator
 
@@ -631,7 +721,7 @@ def test_glm_dflash_generation_and_warm_image_prefix_match_greedy(
     from omlx.cache.state import extract_cache_states
     from omlx.models.vlm import VLMModelAdapter
 
-    target, drafter = _glm_target_and_drafter()
+    target, drafter = _glm_target_and_drafter(verify_mode=verify_mode)
     adapter = VLMModelAdapter(target)
     assert dd.bg.apply()
     tokens = [1, 120 if image else 2] + list(range(3, 29))
@@ -651,12 +741,33 @@ def test_glm_dflash_generation_and_warm_image_prefix_match_greedy(
         expected.append(token)
         out = target.language_model(mx.array([[token]]), cache=reference_cache)
 
+    # Deterministically low acceptance exercises the real policy hook and
+    # width transitions without relying on random tiny weights.
+    wrong = next(token for token in range(128) if token not in expected)
+    draft_batched = drafter._draft_batched
+    widths = []
+    embed = drafter.model._embed_input_tokens
+
+    def observed_embed(inputs):
+        widths.append(int(inputs.shape[1]))
+        return embed(inputs)
+
+    def rejected_drafts(*args, **kwargs):
+        return [
+            (mx.full(tokens.shape, wrong, dtype=tokens.dtype), accept)
+            for tokens, accept in draft_batched(*args, **kwargs)
+        ]
+
+    monkeypatch.setattr(drafter.model, "_embed_input_tokens", observed_embed)
+    monkeypatch.setattr(drafter, "_draft_batched", rejected_drafts)
+
     dd.attach_drafter(target.language_model, drafter)
     rollbacks = []
     original_rollback = target.language_model.rollback_speculative_cache
 
     def rollback(cache, state, accepted, block_size):
-        rollbacks.append(block_size)
+        if block_size > 1:
+            rollbacks.append(block_size)
         return original_rollback(cache, state, accepted, block_size)
 
     monkeypatch.setattr(target.language_model, "rollback_speculative_cache", rollback)
@@ -705,6 +816,8 @@ def test_glm_dflash_generation_and_warm_image_prefix_match_greedy(
         prefix.paged_cache.release_for_eviction(table.block_ids)
         prefix.clear_request_entry("stored")
         for request_id in ("cold", "warm"):
+            rollback_start = len(rollbacks)
+            width_start = len(widths)
             if request_id == "warm":
                 table, suffix = prefix.fetch_cache(request_id, tokens, **cache_keys)
                 assert suffix == tokens[-1:]
@@ -732,6 +845,16 @@ def test_glm_dflash_generation_and_warm_image_prefix_match_greedy(
                     if len(got) >= 12:
                         break
                 assert got == expected
+                assert rollbacks[rollback_start] == widths[width_start] == 8
+                assert set(rollbacks[rollback_start:]) == (
+                    {4, 8} if verify_mode == "adaptive" else {8}
+                )
+                assert set(widths[width_start:]) == (
+                    {4, 8} if verify_mode == "adaptive" else {8}
+                )
+                # One initial draft and one next draft per verify cycle,
+                # including the adaptive width transition.
+                assert len(widths) - width_start == len(rollbacks) - rollback_start + 1
             finally:
                 generator.close()
                 drafter.release_request(request_id)

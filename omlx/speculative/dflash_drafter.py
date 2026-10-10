@@ -56,6 +56,7 @@ class _RowContext:
     keys: list[mx.array] | None = None
     values: list[mx.array] | None = None
     pos: mx.array | None = None
+    policy: Any = None
 
 
 @dataclass
@@ -174,14 +175,29 @@ def _concat_captured(captured: Sequence[mx.array]) -> mx.array:
 class DFlashDrafter:
     """Row-wise DFlash drafting against per-request context caches."""
 
-    def __init__(self, model: nn.Module, *, block_size: int, source_path: str):
+    def __init__(
+        self,
+        model: nn.Module,
+        *,
+        block_size: int,
+        source_path: str,
+        verify_mode: str | None = None,
+    ):
         self.model = model
         self.source_path = source_path
+        self.verify_mode = "adaptive" if verify_mode is None else verify_mode
+        if self.verify_mode not in ("dflash", "adaptive", "ddtree", "off"):
+            raise ValueError(f"Unknown DFlash verify mode: {self.verify_mode!r}")
+        if self.verify_mode in ("ddtree", "off"):
+            logger.warning(
+                "Batched DFlash does not support verify_mode=%s; using fixed blocks",
+                self.verify_mode,
+            )
         self.target_layer_ids: list[int] = [
             int(i) for i in model.config.target_layer_ids
         ]
         self.block_size = resolve_block_size(model, block_size)
-        # Lightning MTP reads this as the fixed draft depth.
+        # Lightning MTP reads this as the maximum draft depth.
         self.depth = self.block_size - 1
         self._rows: dict[Any, _RowContext] = {}
         self._cohort: _Cohort | None = None
@@ -319,6 +335,51 @@ class DFlashDrafter:
     def context_length(self, uid: Any) -> int:
         row = self._rows.get(uid)
         return 0 if row is None else row.fed
+
+    def block_limit(self, uid: Any, prompt_len: int | None = None) -> int:
+        row = self._row(uid)
+        if (
+            self.verify_mode == "adaptive"
+            and self.block_size > 4
+            and row.policy is None
+        ):
+            # Reuse the single-stream policy, including its long-context start
+            # and speed-based probes. Policies belong to requests, not prefixes.
+            from dflash_mlx.engine.spec_epoch import _AdaptiveBlockPolicy
+
+            row.policy = _AdaptiveBlockPolicy.from_runtime(
+                runtime_config=self,
+                effective_block_tokens=self.block_size,
+                verify_len_cap=self.block_size,
+                prompt_len=(
+                    row.fed + self._pending_length(row)
+                    if prompt_len is None
+                    else prompt_len
+                ),
+            )
+        return self.block_size if row.policy is None else row.policy.block_limit()
+
+    def record_cycle(
+        self, uid: Any, block_len: int, acceptance_len: int, cycle_cost_ns: int
+    ) -> None:
+        policy = self._row(uid).policy
+        if policy is None:
+            return
+        before = policy.block_limit()
+        policy.record(
+            block_len=block_len,
+            acceptance_len=acceptance_len,
+            cycle_cost_ns=cycle_cost_ns,
+        )
+        after = policy.block_limit()
+        if before != after:
+            logger.debug(
+                "DFlash adaptive block: uid=%s %d -> %d (%s)",
+                uid,
+                before,
+                after,
+                policy.mode,
+            )
 
     @property
     def cache_signature(self) -> str:
@@ -490,7 +551,7 @@ class DFlashDrafter:
         ``committed[-1]`` is the newest committed token, which anchors the
         block. Writes ``state.drafts`` and clears the head-only logprob lists.
         """
-        rows = []
+        rows, groups = [], {}
         for gen_batch, state, captured, committed, _prev_buf in jobs:
             row = self._row(state.uid)
             if captured:
@@ -499,6 +560,10 @@ class DFlashDrafter:
                 raise RuntimeError(
                     f"DFlash drafter has no context for uid={state.uid!r}"
                 )
+            block = self.block_limit(
+                state.uid,
+                prompt_len=None if gen_batch is None else len(gen_batch.tokens[0]),
+            )
             context = (
                 row.pending[0]
                 if len(row.pending) == 1
@@ -511,20 +576,23 @@ class DFlashDrafter:
             sampler = None
             if gen_batch is not None and not bg._is_greedy(gen_batch):
                 sampler = bg._resolve_draft_sampler(gen_batch, state)
-            rows.append((state, row, context, anchor, sampler))
+            entry = (state, row, context, anchor, sampler)
+            rows.append(entry)
+            groups.setdefault(block, []).append(entry)
         # The drafter's projections see rows x block inputs like a verify
         # forward, so the same small-M kernels apply.
         started = time.perf_counter()
         set_verify_qmm_armed(True)
         try:
-            proposals = self._draft_batched(rows)
+            for block, group in groups.items():
+                proposals = self._draft_batched(group, block_size=block)
+                for (state, *_), (tokens, accept_lps) in zip(group, proposals):
+                    state.drafts = tokens.reshape(-1).astype(mx.uint32)
+                    mx.async_eval(state.drafts)
+                    state.draft_lps = []
+                    state.draft_accept_lps = accept_lps
         finally:
             set_verify_qmm_armed(False)
-        for (state, *_), (tokens, accept_lps) in zip(rows, proposals):
-            state.drafts = tokens.reshape(-1).astype(mx.uint32)
-            mx.async_eval(state.drafts)
-            state.draft_lps = []
-            state.draft_accept_lps = accept_lps
         # Dispatch time shared across the rows; the GPU work overlaps the
         # next verify like the MTP head's async draft.
         share = (time.perf_counter() - started) * 1000 / max(1, len(rows))
@@ -541,7 +609,9 @@ class DFlashDrafter:
         drafts while the host settles the cycle; ``adopt_predraft`` then keeps
         the block if the host commits the same count.
         """
-        if not captured:
+        # Adaptive width needs host acceptance and cycle timing. Its next
+        # draft is dispatched once, after record_cycle updates the policy.
+        if not captured or (self.verify_mode == "adaptive" and self.block_size > 4):
             return False
         row = self._row(state.uid)
         unfed = self._pending_length(row)
@@ -561,6 +631,7 @@ class DFlashDrafter:
                 [(state, row, context, anchor.reshape(1).astype(mx.int32), sampler)],
                 counts=[count.reshape(1) + unfed],
                 commit=False,
+                block_size=self.block_limit(state.uid),
             )
         finally:
             set_verify_qmm_armed(False)
@@ -648,7 +719,9 @@ class DFlashDrafter:
         self._cohort = _Cohort(uids=uids, keys=keys, values=values, pos=pos)
         return self._cohort
 
-    def _draft_batched(self, rows: Sequence[tuple], counts=None, commit=True):
+    def _draft_batched(
+        self, rows: Sequence[tuple], counts=None, commit=True, block_size=None
+    ):
         """One draft forward for every row; mirrors DFlashAttention rowwise math.
 
         ``counts`` optionally gives each row's committed context rows as a lazy
@@ -660,7 +733,7 @@ class DFlashDrafter:
         slots = self.ring_slots
         capacity = self.capacity
         batch = len(rows)
-        block = self.block_size
+        block = self.block_size if block_size is None else block_size
         dtype = model.fc.weight.dtype if hasattr(model.fc, "weight") else mx.bfloat16
         if hasattr(model.fc, "scales"):
             dtype = model.fc.scales.dtype
@@ -1198,6 +1271,7 @@ def load_dflash_drafter(
     target_model: Any,
     *,
     block_size: int | None = None,
+    verify_mode: str | None = None,
     quant_enabled: bool = False,
     quant_bits: int = 4,
     quant_group_size: int = 64,
@@ -1224,12 +1298,15 @@ def load_dflash_drafter(
     if qwen35_packed_linear.enabled(target_model):
         packed = qwen35_packed_linear.pack_drafter(model)
         logger.info("DFlash drafter packed 4-bit projections: %d layers", packed)
-    drafter = DFlashDrafter(model, block_size=block, source_path=path)
+    drafter = DFlashDrafter(
+        model, block_size=block, source_path=path, verify_mode=verify_mode
+    )
     logger.info(
-        "DFlash drafter loaded: path=%s kind=%s block=%d target_layers=%s",
+        "DFlash drafter loaded: path=%s kind=%s block=%d verify_mode=%s target_layers=%s",
         path,
         drafter.kind,
         block,
+        drafter.verify_mode,
         drafter.target_layer_ids,
     )
     return drafter

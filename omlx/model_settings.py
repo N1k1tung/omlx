@@ -266,11 +266,11 @@ class ModelSettings:
         specprefill_draft_model: Path to draft model for SpecPrefill.
         specprefill_keep_pct: Keep rate for SpecPrefill (0.1–0.5).
         specprefill_threshold: Min tokens to trigger SpecPrefill.
-        dflash_enabled: Enable DFlash speculative decoding. Qwen3.5-family VLM
+        dflash_enabled: Enable DFlash speculative decoding. Qwen3.5-family VLM and GLM5.3-Flash
             targets draft inside the batched engine (Lightning MTP verify path
             with greedy or sampled acceptance, continuous batching); other
             targets use the single-stream DFlash engine, which alone honours
-            the max_ctx, window, sink and verify_mode settings below.
+            the max_ctx, window and sink settings below.
             Served engines share the global native cache settings.
         dflash_draft_model: Path/repo for DFlash draft checkpoint.
         dflash_draft_quant_enabled: Enable draft model quantization.
@@ -291,7 +291,8 @@ class ModelSettings:
         dflash_block_size: Draft/verify tokens per cycle (None = checkpoint default).
         dflash_verify_mode: Verifier algorithm — "dflash", "adaptive", "ddtree", or "off"
             (None = dflash default "adaptive"). "adaptive" can shrink block size when
-            acceptance drops.
+            acceptance drops. Batched DFlash supports "adaptive" and fixed-block
+            "dflash"; "ddtree" and "off" require the single-stream engine.
         mtp_enabled: Enable native multi-token prediction (mlx-lm PR 990 / PR 15 monkey-patch).
             When True, BatchGenerator uses MTP draft+verify for singleton decode and
             for multi-row decode batches whose cache positions are aligned. Unaligned
