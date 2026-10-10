@@ -336,27 +336,19 @@ class DFlashDrafter:
         row = self._rows.get(uid)
         return 0 if row is None else row.fed
 
-    def block_limit(self, uid: Any, prompt_len: int | None = None) -> int:
+    def block_limit(self, uid: Any) -> int:
         row = self._row(uid)
         if (
             self.verify_mode == "adaptive"
             and self.block_size > 4
             and row.policy is None
         ):
-            # Reuse the single-stream policy, including its long-context start
-            # and speed-based probes. Policies belong to requests, not prefixes.
+            # Reuse acceptance and speed probes, starting at the configured
+            # width: the single-stream 32k heuristic is not calibrated for
+            # batched verify kernels. Policies belong to requests, not prefixes.
             from dflash_mlx.engine.spec_epoch import _AdaptiveBlockPolicy
 
-            row.policy = _AdaptiveBlockPolicy.from_runtime(
-                runtime_config=self,
-                effective_block_tokens=self.block_size,
-                verify_len_cap=self.block_size,
-                prompt_len=(
-                    row.fed + self._pending_length(row)
-                    if prompt_len is None
-                    else prompt_len
-                ),
-            )
+            row.policy = _AdaptiveBlockPolicy(full_block_tokens=self.block_size)
         return self.block_size if row.policy is None else row.policy.block_limit()
 
     def record_cycle(
@@ -560,10 +552,7 @@ class DFlashDrafter:
                 raise RuntimeError(
                     f"DFlash drafter has no context for uid={state.uid!r}"
                 )
-            block = self.block_limit(
-                state.uid,
-                prompt_len=None if gen_batch is None else len(gen_batch.tokens[0]),
-            )
+            block = self.block_limit(state.uid)
             context = (
                 row.pending[0]
                 if len(row.pending) == 1
@@ -609,11 +598,40 @@ class DFlashDrafter:
         drafts while the host settles the cycle; ``adopt_predraft`` then keeps
         the block if the host commits the same count.
         """
-        # Adaptive width needs host acceptance and cycle timing. Its next
-        # draft is dispatched once, after record_cycle updates the policy.
-        if not captured or (self.verify_mode == "adaptive" and self.block_size > 4):
+        if not captured:
             return False
         row = self._row(state.uid)
+        policy = row.policy
+        if policy is not None:
+            # Wait only when this sample could change width. Otherwise retain
+            # fixed-mode overlap without ever computing a discarded-width draft.
+            if policy.mode == "full":
+                commits = [*policy.full_commits, 1][-policy.window_size :]
+                acceptance, tpc = policy._window_stats(commits)
+                if len(commits) >= policy.window_size and (
+                    acceptance < policy.drop_acceptance_threshold
+                    or tpc < policy.tpc_threshold
+                ):
+                    return False
+            elif policy.mode == "probe":
+                if policy.probe_cycles_remaining <= 1:
+                    return False
+            else:
+                cycles = policy.reduced_cycles_since_probe + 1
+                if cycles >= policy.reduced_burst_cycles:
+                    return False
+                if (
+                    policy.early_probe_min_cycles > 0
+                    and not policy.early_probe_lockout
+                    and cycles >= policy.early_probe_min_cycles
+                ):
+                    window = max(1, policy.early_probe_window)
+                    accepts = policy.reduced_full_accepts.copy()
+                    accepts.append(1)
+                    if len(accepts) >= window and (
+                        sum(accepts) / len(accepts) >= policy.early_probe_full_acceptance
+                    ):
+                        return False
         unfed = self._pending_length(row)
         context = mx.concatenate([*row.pending, _concat_captured(captured)], axis=1)
         if (

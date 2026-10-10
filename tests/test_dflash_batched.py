@@ -186,11 +186,12 @@ def test_adaptive_blocks_are_per_request_and_resize_the_forward(monkeypatch):
         drafter.record_cycle(0, 8, 7, 2_000_000)
     assert drafter._rows[0].policy.mode == "full"
     drafter._row(2).fed = 32768
-    assert drafter.block_limit(2) == 4
+    assert drafter.block_limit(2) == 8
     drafter.release([0])
     assert drafter.block_limit(0) == 8  # A new request starts with a new policy.
     fixed = _tiny_drafter(block_size=8, verify_mode="dflash")
-    assert fixed.block_limit(0, prompt_len=32768) == 8
+    fixed._row(0).fed = 32768
+    assert fixed.block_limit(0) == 8
 
 
 @pytest.mark.parametrize("expand", [False, True])
@@ -201,6 +202,8 @@ def test_adaptive_draft_waits_for_policy_update(expand, monkeypatch):
         if expand:
             for _ in range(4):
                 d.record_cycle(0, 8, 0, 2_000_000)
+        for _ in range(15 if expand else 3):
+            d.record_cycle(0, 4 if expand else 8, 3 if expand else 0, 2_000_000)
     state = SimpleNamespace(uid=0)
     captured = _captured(4 if expand else 8, seed=90)
     widths = []
@@ -214,8 +217,7 @@ def test_adaptive_draft_waits_for_policy_update(expand, monkeypatch):
     assert not drafter.predraft(None, state, captured, mx.array([1]), mx.array([7]))
     assert widths == [] and drafter._predraft is None
     for d in (drafter, plain):
-        for _ in range(16 if expand else 4):
-            d.record_cycle(0, 4 if expand else 8, 3 if expand else 0, 2_000_000)
+        d.record_cycle(0, 4 if expand else 8, 3 if expand else 0, 2_000_000)
     assert drafter.context_length(0) == plain.context_length(0) == 3
     for d in (drafter, plain):
         d.draft([(None, state, [c[:, :1] for c in captured], mx.array([7]), None)])
@@ -227,7 +229,9 @@ def test_adaptive_draft_waits_for_policy_update(expand, monkeypatch):
     assert drafter.context_length(0) == plain.context_length(0) == 4
 
 
-@pytest.mark.parametrize("block_size, verify_mode", [(BLOCK, None), (8, "dflash")])
+@pytest.mark.parametrize(
+    "block_size, verify_mode", [(BLOCK, None), (8, "dflash"), (8, "adaptive")]
+)
 def test_predraft_adopt_matches_drafting_committed_rows(block_size, verify_mode):
     """A predraft over every verify row equals drafting the committed rows, and
     a discarded one leaves the ring as it was, across ring wrap-around."""
