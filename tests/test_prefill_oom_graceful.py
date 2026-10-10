@@ -2027,6 +2027,46 @@ def test_glm5_next_prefill_profile_registered():
     assert sparse <= gathered_bound * 2
 
 
+@pytest.mark.parametrize(
+    ("current_gb", "kv_len"),
+    [(187.35, 200_000), (187.35, 400_000), (215, 400_000), (215, 432_000)],
+)
+def test_glm5_next_native_prefill_keeps_full_chunk_with_headroom(current_gb, kv_len):
+    """Replay the 4096 -> 1024 throttle at the reported custom ceiling."""
+    current = int(current_gb * _GB)
+    ns = _throttle_ctx(
+        current=current,
+        hard=int(237.86 * _GB),
+        monitor=_glm5_next_monitor(),
+        abort_margin=0.95,
+    )
+    ns._prefill_headroom_safety = 0.95
+    ns._fake_current = current
+    with patch("omlx.custom_kernels.glm_moe_dsa.fast.has_symbol", return_value=True):
+        assert _call(ns, 4096, kv_len=kv_len) == 4096
+        assert _guard_call(ns, 4096, kv_len=kv_len) == 4096
+
+
+@pytest.mark.parametrize("native_indexer", [False, True])
+@pytest.mark.parametrize("native_mla", [False, True])
+def test_glm5_next_long_prefill_prices_available_kernels(native_indexer, native_mla):
+    profile = make_prefill_memory_profile(_glm5_next_config(), compute_dtype_size=2)
+    symbols = {
+        "dsa_indexer_scores": native_indexer,
+        "dsa_topk_indices": native_indexer,
+        "glm_dsa_sparse_mla_attention": native_mla,
+    }
+    with patch("omlx.custom_kernels.glm_moe_dsa.fast.has_symbol", side_effect=symbols.get):
+        transient = profile.estimate_prefill_transient_bytes(4096, 400_000)
+    if not native_indexer:
+        assert transient >= 32 * 4096 * (400_000 // 4) * 4
+    if not native_mla:
+        # The long-query fallback expands the entire cached K/V, not a gather.
+        assert transient >= 400_000 * 64 * (256 + 256) * (2 + 4)
+    if native_indexer and native_mla:
+        assert transient < 8 * _GB
+
+
 def test_glm5_next_profile_prices_exact_block_expansion_for_small_chunks():
     """Exact-block pricing must include K/V expansion even for small query chunks."""
     profile = make_prefill_memory_profile(_glm5_next_config(), compute_dtype_size=2)

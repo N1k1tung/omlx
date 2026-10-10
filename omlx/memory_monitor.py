@@ -1515,15 +1515,55 @@ class _GLM5NextPrefillMemoryProfile:
         else:
             # Selection active: the indexer scores every pooled key and the q
             # projection expands to the latent width on both routes.
+            from omlx.custom_kernels.glm_moe_dsa import fast
+
             pooled = max(kv_len // max(self.index_kpool, 1), 1)
-            indexer = (
-                self.index_n_heads * query_tokens * pooled * 4
-                + query_tokens * (self.index_n_heads + 1) * self.index_head_dim * self.dtype_size
+            native_indexer = (
+                self.dtype_size == 2
+                and self.index_n_heads == 32
+                and self.index_head_dim == 128
+                and fast.has_symbol("dsa_indexer_scores")
             )
+            # Fused indexers reduce heads in registers, storing only [L, P].
+            # Keep both raw and masked scores, and price all lazy chunks even
+            # when the NAX dispatcher bounds each individual score buffer.
+            score_bytes = (
+                2 * self.score_dtype_size if native_indexer else self.index_n_heads * 4
+            )
+            indexer = (
+                query_tokens * pooled * score_bytes
+                + query_tokens * (self.index_n_heads + 1) * self.index_head_dim * self.dtype_size
+                + query_tokens * (self.index_topk + self.index_kpool - 1) * 4
+            )
+            if native_indexer and not (
+                min(self.index_topk // self.index_kpool, pooled) == 512
+                and fast.has_symbol("dsa_topk_indices")
+            ):
+                # MLX argpartition also holds negated scores and int32 indices.
+                indexer += query_tokens * pooled * (self.score_dtype_size + 4)
             q_latent = (
                 query_tokens * self.num_attention_heads * self.kv_lora_rank * self.dtype_size
             )
-            if kv_len < _GLM5_NEXT_SPARSE_MLA_MIN_KV:
+            native_mla = (
+                kv_len >= _GLM5_NEXT_SPARSE_MLA_MIN_KV
+                and query_tokens > 8
+                and self.dtype_size == 2
+                and self.kv_lora_rank == 512
+                and self.num_attention_heads in (32, 64)
+                and self.index_topk >= 16
+                and fast.has_symbol("glm_dsa_sparse_mla_attention")
+            )
+            if native_mla:
+                # Native/NAX MLA reads selected latents in place: no [L, topk,
+                # latent] gather. Bound output at FP32 plus input casts and
+                # the classic kernel's zero RoPE tensors. Requiring the classic
+                # symbol keeps this bound valid for FP16 and batched NAX fallbacks.
+                core = (
+                    query_tokens * self.num_attention_heads * self.kv_lora_rank * 4
+                    + kv_len * self.kv_lora_rank * self.dtype_size
+                    + (query_tokens * self.num_attention_heads + kv_len) * 64 * self.dtype_size
+                )
+            elif kv_len < _GLM5_NEXT_SPARSE_MLA_MIN_KV or query_tokens > 8:
                 # Exact-block attention expands all cached K/V, regardless of query length.
                 # Include both FP32 projection outputs and their kernel input casts.
                 core = (
@@ -1533,7 +1573,7 @@ class _GLM5NextPrefillMemoryProfile:
                     * (self.dtype_size + _GLM5_NEXT_EXACT_BLOCK_PROMOTION_DTYPE_SIZE)
                 )
             else:
-                # A full latent gather bounds the tiled sparse-MLA allocation.
+                # Short-query fallback materializes the selected latent rows.
                 core = (
                     query_tokens
                     * min(self.index_topk, kv_len)
