@@ -173,6 +173,10 @@
             settingsCopiedAnchor: null,
             _settingsSyncPausedUntil: 0,
             _settingsScrollWatched: false,
+            // Model settings modal section rail
+            modelSettingsActiveSection: 'ms-basic',
+            _modelSettingsSyncPausedUntil: 0,
+            _modelSettingsScrollFrame: 0,
 
             // Mobile menu
             mobileMenuOpen: false,
@@ -206,6 +210,7 @@
                     openclaw_model: null,
                     hermes_model: null,
                     pi_model: null,
+                    vibe_model: null,
                     dsh_model: null,
                     openclaw_tools_profile: 'full',
                     markitdown_enabled: true,
@@ -221,6 +226,14 @@
                     web_search_content_mode: 'snippet',
                     web_search_content_truncate: true,
                     web_search_content_max_chars: 20000,
+                    splash_path: null,
+                    splash_kv_format: 'int8',
+                    splash_max_memory_gb: null,
+                    splash_ssd_cache_gb: null,
+                    splash_ane_prefill: true,
+                },
+                external_engines: {
+                    splash: { available: false, path: null, auto_detected: null, version: null, label: null, reason: '', install_hint: '', models: [] },
                 },
                 ui: { language: 'en', dashboard_layout: null },
                 idle_timeout: { idle_timeout_seconds: null },
@@ -229,6 +242,9 @@
 
             // Web search "Test search" button state
             webSearchTest: { running: false, ok: null, message: '' },
+            // Splash launcher path row: manual entry when not detected or changed
+            splashPath: { editing: false, draft: '', error: '', saving: false },
+            splashOptionsError: '',
             // Engines selectable for the DDGS Custom provider (ddgs 9.14.1 text registry)
             ddgsBackendList: ['brave', 'duckduckgo', 'grokipedia', 'mojeek', 'wikipedia', 'yahoo', 'yandex'],
 
@@ -311,6 +327,8 @@
                 moe_expert_offload_resident_fraction: 0.25,
                 qwen35_oq_a8_enabled: false,
                 qwen35_oq_a8_min_tokens: 128,
+                external_engine: '',
+                external_engines: [],
                 trust_remote_code: false,
                 embedding_audio_enabled: false,
                 embedding_audio_max_seconds: null,
@@ -1018,20 +1036,22 @@
                 const sections = Array.from(document.querySelectorAll('#panel-settings .settings-section'))
                     .filter((el) => el.getClientRects().length);
                 if (!sections.length) return;
-                // At the bottom of the page the last sections cannot reach the line.
                 const doc = document.documentElement;
-                if (window.scrollY > 0 && window.scrollY + window.innerHeight >= doc.scrollHeight - 2) {
-                    this.settingsActiveSection = sections[sections.length - 1].id;
-                    return;
-                }
+                const atBottom = window.scrollY > 0 && window.scrollY + window.innerHeight >= doc.scrollHeight - 2;
+                this.settingsActiveSection = this._currentSectionId(
+                    sections, atBottom, (el) => parseFloat(getComputedStyle(el).scrollMarginTop) || 0);
+            },
+
+            _currentSectionId(sections, atBottom, lineOf) {
+                // At the bottom the last sections cannot reach the line.
+                if (atBottom) return sections[sections.length - 1].id;
                 // A section is current once its top passes the line it scrolls to.
                 let current = sections[0].id;
                 for (const el of sections) {
-                    const line = parseFloat(getComputedStyle(el).scrollMarginTop) || 0;
-                    if (el.getBoundingClientRect().top > line + 1) break;
+                    if (el.getBoundingClientRect().top > lineOf(el) + 1) break;
                     current = el.id;
                 }
-                this.settingsActiveSection = current;
+                return current;
             },
 
             settingsWatchScroll() {
@@ -1047,6 +1067,40 @@
                 };
                 window.addEventListener('scroll', onScroll, { passive: true });
                 window.addEventListener('resize', onScroll);
+            },
+
+            modelSettingsGoToSection(id) {
+                this.modelSettingsActiveSection = id;
+                // Smooth scrolling passes other sections; keep the clicked one marked.
+                this._modelSettingsSyncPausedUntil = Date.now() + 1000;
+                this.$nextTick(() => {
+                    const body = this.$refs.modelSettingsBody;
+                    const target = document.getElementById(id);
+                    if (!body || !target || !target.getClientRects().length) return;
+                    // scrollIntoView would also scroll the page behind the dialog.
+                    const top = body.scrollTop + target.getBoundingClientRect().top
+                        - body.getBoundingClientRect().top - parseFloat(getComputedStyle(body).paddingTop);
+                    const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+                    body.scrollTo({ top, behavior: reduce ? 'auto' : 'smooth' });
+                });
+            },
+
+            modelSettingsSyncActiveSection(body) {
+                if (Date.now() < this._modelSettingsSyncPausedUntil) return;
+                const sections = Array.from(body.querySelectorAll('.model-settings-section'))
+                    .filter((el) => el.getClientRects().length);
+                if (!sections.length) return;
+                const atBottom = body.scrollTop > 0 && body.scrollTop + body.clientHeight >= body.scrollHeight - 2;
+                const line = body.getBoundingClientRect().top + parseFloat(getComputedStyle(body).paddingTop);
+                this.modelSettingsActiveSection = this._currentSectionId(sections, atBottom, () => line);
+            },
+
+            modelSettingsOnScroll(body) {
+                if (this._modelSettingsScrollFrame) return;
+                this._modelSettingsScrollFrame = requestAnimationFrame(() => {
+                    this._modelSettingsScrollFrame = 0;
+                    this.modelSettingsSyncActiveSection(body);
+                });
             },
 
             settingsCopyAnchor(id) {
@@ -1187,6 +1241,7 @@
                             auth: { ...this.globalSettings.auth, ...data.auth },
                             claude_code: { ...this.globalSettings.claude_code, ...data.claude_code },
                             integrations: { ...this.globalSettings.integrations, ...data.integrations },
+                            external_engines: { ...this.globalSettings.external_engines, ...data.external_engines },
                             idle_timeout: { ...this.globalSettings.idle_timeout, ...data.idle_timeout },
                             system: { ...this.globalSettings.system, ...data.system },
                         };
@@ -2038,6 +2093,8 @@
                     thinking_default: model?.thinking_default ?? null,
                     qwen4_ple_ssd_offload: model?.qwen4_ple_ssd_offload_forced === true
                         || s.qwen4_ple_ssd_offload === true,
+                    qwen4_ple_ssd_offload_requested:
+                        s.qwen4_ple_ssd_offload === true,
                     qwen4_ple_ssd_offload_supported:
                         model?.qwen4_ple_ssd_offload_supported === true,
                     qwen4_ple_ssd_offload_forced:
@@ -2129,6 +2186,8 @@
                     vlm_mtp_draft_block_size: s.vlm_mtp_draft_block_size ?? null,
                     ctKwargEntries,
                     is_diffusion_model: isDiffusion,
+                    external_engine: s.external_engine || '',
+                    external_engines: model?.external_engines || [],
                     trust_remote_code: s.trust_remote_code || false,
                     embedding_audio_enabled: s.embedding_audio_enabled || false,
                     embedding_audio_max_seconds: s.embedding_audio_max_seconds ?? null,
@@ -2871,6 +2930,10 @@
                 }
                 this._modelSettingsBaseline = JSON.stringify(this.modelSettings);
                 this.showModelSettingsModal = true;
+                // Sync on the next frame: sections have no layout until the dialog opens.
+                this.$nextTick(() => {
+                    if (this.$refs.modelSettingsBody) this.modelSettingsOnScroll(this.$refs.modelSettingsBody);
+                });
             },
 
             async importMtplxSidecar() {
@@ -2895,6 +2958,15 @@
                 } finally {
                     this.importingMtplx = false;
                 }
+            },
+
+            // Qwen4 PLE and DeepSeek V4.1 Engram share one row; a model supports at most one.
+            ssdNgramOffloadKey() {
+                if (this.modelSettings.qwen4_ple_ssd_offload_supported) return 'qwen4_ple_ssd_offload';
+                if (this.modelSettings.deepseek_v41_engram_ssd_offload_supported) {
+                    return 'deepseek_v41_engram_ssd_offload';
+                }
+                return null;
             },
 
             isQwenOqA8Model(model) {
@@ -3066,7 +3138,9 @@
                                     : 0,
                                 enable_thinking: this.selectedModel?.thinking_forced ? null : this.modelSettings.enable_thinking,
                                 qwen4_ple_ssd_offload:
-                                    !!this.modelSettings.qwen4_ple_ssd_offload,
+                                    this.modelSettings.qwen4_ple_ssd_offload_forced
+                                        ? !!this.modelSettings.qwen4_ple_ssd_offload_requested
+                                        : !!this.modelSettings.qwen4_ple_ssd_offload,
                                 deepseek_v41_ced_prefill_enabled:
                                     !!this.modelSettings.deepseek_v41_ced_prefill_enabled,
                                 deepseek_v41_engram_ssd_offload:
@@ -3196,6 +3270,7 @@
                                     ? parseInt(this.modelSettings.vlm_mtp_draft_block_size)
                                     : null,
                                 trust_remote_code: this.modelSettings.trust_remote_code,
+                                external_engine: this.modelSettings.external_engine || null,
                             };
                             if (isDiffusion) {
                                 Object.assign(payload, {
@@ -3234,6 +3309,7 @@
                                     specprefill_draft_model: null,
                                     specprefill_keep_pct: null,
                                     specprefill_threshold: null,
+                                    external_engine: null,
                                     dflash_enabled: false,
                                     dflash_draft_model: null,
                                     dflash_draft_quant_enabled: false,
@@ -4094,6 +4170,12 @@
                 return this._launchCmd('pi');
             },
 
+            get vibeCommand() {
+                const model = this.globalSettings.integrations.vibe_model;
+                const command = this._launchCmd('vibe');
+                return model ? `${command} --model ${this.shellQuote(model)}` : command;
+            },
+
             get dshCommand() {
                 return this._launchCmd('dsh');
             },
@@ -4122,6 +4204,7 @@
                             integrations_openclaw_model: this.globalSettings.integrations.openclaw_model,
                             integrations_hermes_model: this.globalSettings.integrations.hermes_model,
                             integrations_pi_model: this.globalSettings.integrations.pi_model,
+                            integrations_vibe_model: this.globalSettings.integrations.vibe_model,
                             integrations_dsh_model: this.globalSettings.integrations.dsh_model,
                             integrations_openclaw_tools_profile: this.globalSettings.integrations.openclaw_tools_profile,
                             markitdown_enabled: this.globalSettings.integrations.markitdown_enabled,
@@ -4137,14 +4220,84 @@
                             web_search_content_mode: this.globalSettings.integrations.web_search_content_mode,
                             web_search_content_truncate: this.globalSettings.integrations.web_search_content_truncate,
                             web_search_content_max_chars: this.globalSettings.integrations.web_search_content_max_chars,
+                            splash_path: this.globalSettings.integrations.splash_path,
+                            splash_kv_format: this.globalSettings.integrations.splash_kv_format,
+                            splash_max_memory_gb: this.globalSettings.integrations.splash_max_memory_gb,
+                            splash_ssd_cache_gb: this.globalSettings.integrations.splash_ssd_cache_gb,
+                            splash_ane_prefill: this.globalSettings.integrations.splash_ane_prefill,
                         }),
                     });
                     if (!response.ok) {
+                        const data = await response.json().catch(() => ({}));
                         console.error('Failed to save integration settings');
+                        return data.detail || window.t('settings.integrations.save_failed');
                     }
                 } catch (err) {
                     console.error('Failed to save integration settings:', err);
+                    return String(err);
                 }
+                return '';
+            },
+
+            // Number inputs where an empty field means "automatic".
+            optionalNumber(value) {
+                return value === '' || value === null || value === undefined ? null : Number(value);
+            },
+
+            // The first external engine that can serve the model, or ''.
+            firstUsableExternalEngine() {
+                const usable = (this.modelSettings.external_engines || []).find(e => e.compatible);
+                return usable ? usable.id : '';
+            },
+
+            externalEngineReason() {
+                const engines = this.modelSettings.external_engines || [];
+                const selected = engines.find(e => e.id === this.modelSettings.external_engine);
+                if (selected) return selected.compatible ? '' : selected.reason;
+                return engines.some(e => e.compatible) ? '' : (engines[0]?.reason || '');
+            },
+
+            // Saves a Splash size in GB; empty means automatic. A value the
+            // server would reject is put back so later saves keep working.
+            async saveSplashSize(field, input, minimum) {
+                const previous = this.globalSettings.integrations[field];
+                const value = this.optionalNumber(input.value);
+                let error = '';
+                if (value !== null && !(value >= minimum)) {
+                    error = window.t('settings.integrations.splash.invalid_size');
+                } else {
+                    this.globalSettings.integrations[field] = value;
+                    error = await this.saveIntegrationSettings();
+                }
+                if (error) {
+                    this.globalSettings.integrations[field] = previous;
+                    input.value = previous ?? '';
+                }
+                this.splashOptionsError = error;
+            },
+
+            editSplashPath() {
+                const splash = this.globalSettings.external_engines.splash;
+                this.splashPath.draft = this.globalSettings.integrations.splash_path || splash.path || '';
+                this.splashPath.error = '';
+                this.splashPath.editing = true;
+            },
+
+            async applySplashPath(path) {
+                this.splashPath.saving = true;
+                this.splashPath.error = '';
+                const previous = this.globalSettings.integrations.splash_path;
+                this.globalSettings.integrations.splash_path = (path || '').trim() || null;
+                const error = await this.saveIntegrationSettings();
+                if (error) {
+                    this.globalSettings.integrations.splash_path = previous;
+                    this.splashPath.error = error;
+                } else {
+                    this.splashPath.editing = false;
+                    await this.loadGlobalSettings();
+                    this.loadModels();
+                }
+                this.splashPath.saving = false;
             },
 
             ddgsBackendChecked(name) {
@@ -5136,7 +5289,7 @@
                     lines.push('');
                     lines.push(window.t('bench.results.single.section_label'));
                     lines.push('-'.repeat(80));
-                    const hdr = [rpad(window.t('bench.results.single.test'), 32), pad('TTFT(ms)', 10), pad('TPOT(ms)', 10), pad('pp TPS', 12), pad('tg TPS', 12), pad('E2E(s)', 10), pad(window.t('bench.results.single.throughput'), 12), pad(window.t('bench.results.single.peak_mem'), 10)];
+                    const hdr = [rpad(window.t('bench.results.single.test'), 32), pad('TTFT(ms)', 10), pad('TPOT(ms)', 10), pad('PP TPS', 12), pad('TG TPS', 12), pad('E2E(s)', 10), pad(window.t('bench.results.single.throughput'), 12), pad(window.t('bench.results.single.peak_mem'), 10)];
                     lines.push(hdr.join('  '));
                     for (const r of this.benchSingleResults) {
                         const row = [
@@ -5161,7 +5314,7 @@
                     lines.push(`${title}`);
                     lines.push(subtitle);
                     lines.push('-'.repeat(80));
-                    const hdr = [rpad(window.t('bench.results.text_export.batch'), 8), pad('tg TPS', 12), pad(window.t('bench.results.batch.speedup'), 8), pad('pp TPS', 12), pad('pp TPS/req', 12), pad('TTFT(ms)', 10), pad('E2E(s)', 10)];
+                    const hdr = [rpad(window.t('bench.results.text_export.batch'), 8), pad('TG TPS', 12), pad(window.t('bench.results.batch.speedup'), 8), pad('PP TPS', 12), pad('PP TPS/req', 12), pad('TTFT(ms)', 10), pad('E2E(s)', 10)];
                     lines.push(hdr.join('  '));
                     if (baseline) {
                         const row = [
@@ -7130,7 +7283,7 @@
 
             oqAvailableLevels() {
                 return this.oqSelectedModelType() === 'deepseek_v41'
-                    ? [3, 4] : [2, 2.5, 2.7, 3, 3.5, 4, 5, 6, 8];
+                    ? [2, 2.5, 2.7, 3, 4] : [2, 2.5, 2.7, 3, 3.5, 4, 5, 6, 8];
             },
 
             oqApplyModelPolicy() {
@@ -7410,6 +7563,18 @@
             downloadRecommended(repoId) {
                 this.hfRepoId = repoId;
                 this.startHFDownload();
+            },
+
+            isModelDownloaded(repoId) {
+                if (!repoId) return false;
+                const wanted = repoId.toLowerCase();
+                const matches = item => item.repo_id?.toLowerCase() === wanted;
+                // A cancelled or failed download keeps its finished files for resume.
+                const unfinished = [this.hfTasks, this.msTasks].some(tasks => {
+                    const latest = tasks.findLast(matches);
+                    return latest && latest.status !== 'completed';
+                });
+                return !unfinished && this.hfModels.some(matches);
             },
 
             getMemoryFitStatus(sizeBytes) {

@@ -206,9 +206,10 @@ class TestHFDownloader:
             await downloader.start_download("no-slash")
 
     @pytest.mark.asyncio
-    async def test_start_download_invalid_repo_id_too_many_parts(self, downloader):
+    @pytest.mark.parametrize("repo_id", ["a/b/c", "../..", "a/..", "/etc"])
+    async def test_start_download_invalid_repo_id_parts(self, downloader, repo_id):
         with pytest.raises(ValueError, match="Invalid repository ID"):
-            await downloader.start_download("a/b/c")
+            await downloader.start_download(repo_id)
 
     @pytest.mark.asyncio
     async def test_start_download_strips_whitespace(self, downloader):
@@ -1175,6 +1176,12 @@ class TestHFDownloaderRoutes:
                 == "deepsweet/Qwen3.6-27B-MLX-oQ5-FP16"
             )
             assert display_names["model-a"] == "model-a"
+
+            repo_ids = {m["name"]: m["repo_id"] for m in models}
+            assert repo_ids["Qwen3.6-27B-MLX-oQ5-FP16"] == (
+                "deepsweet/Qwen3.6-27B-MLX-oQ5-FP16"
+            )
+            assert repo_ids["model-a"] is None
 
             for m in models:
                 assert "size" in m

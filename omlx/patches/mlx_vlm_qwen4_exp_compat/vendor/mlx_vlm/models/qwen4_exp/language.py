@@ -586,6 +586,45 @@ class QSAKVCache(_QSAIndexerCache, KVCache):
     def merge(cls, caches):
         return BatchQSAKVCache.merge(caches)
 
+    def _kv_bytes_per_token(self) -> int:
+        return (self.keys.nbytes + self.values.nbytes) // max(1, self.keys.shape[2])
+
+    def _reserved_capacity(self, tokens: int) -> int:
+        # One spare step keeps a short reply from copying the K/V buffers
+        # right after prefill.
+        return (-(-int(tokens) // self.step) + 1) * self.step
+
+    def prefill_capacity_bytes(self, tokens: int) -> int:
+        """Bytes ``reserve_prefill_capacity(tokens)`` would add."""
+        if self.keys is None:
+            return 0
+        added = self._reserved_capacity(tokens) - self.keys.shape[2]
+        return added * self._kv_bytes_per_token() if added > 0 else 0
+
+    def prefill_spare_bytes(self) -> int:
+        """Bytes of K/V capacity beyond the tokens written so far."""
+        if self.keys is None:
+            return 0
+        return (self.keys.shape[2] - self.offset) * self._kv_bytes_per_token()
+
+    def reserve_prefill_capacity(self, tokens: int) -> list:
+        """Size K/V for a known prompt length in one allocation.
+
+        Geometric regrowth leaves up to half the buffer unused and the old
+        copy in the MLX pool. After a reservation the cache grows in plain
+        steps, like the indexer. Returns the arrays to evaluate.
+        """
+        if not self.prefill_capacity_bytes(tokens):
+            return []
+        capacity = self._reserved_capacity(tokens)
+        for name in ("keys", "values"):
+            old = getattr(self, name)
+            new = mx.zeros((*old.shape[:2], capacity, old.shape[3]), dtype=old.dtype)
+            new[..., : self.offset, :] = old[..., : self.offset, :]
+            setattr(self, name, new)
+        self.geometric_growth = False
+        return [self.keys, self.values]
+
     def to_quantized(self, group_size: int = 64, bits: int = 4):
         base = super().to_quantized(group_size=group_size, bits=bits)
         cache = QSAQuantizedKVCache(group_size=group_size, bits=bits)
@@ -2680,7 +2719,7 @@ class Qwen4ExpAttention(Qwen3_5Attention):
         launch takes the four projections and the kernels this layout."""
         rotary = self.rotary_emb
         return (
-            rotary.fused_apply
+            rotary.position_selector is not None
             and rotary.pairing == "half_split"
             and self.q_norm.group_size is None
             and self.k_norm.group_size is None
@@ -2740,6 +2779,7 @@ class Qwen4ExpAttention(Qwen3_5Attention):
             heads=self.num_attention_heads,
             kv_heads=self.num_key_value_heads,
             rotary_dim=rotary.dim,
+            rope_scale=rotary.attention_scaling,
         )
         return q_out, index_out, v_out, queries, keys, index_positions
 

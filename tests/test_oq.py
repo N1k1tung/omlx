@@ -1359,8 +1359,8 @@ class TestStreamingHelpers:
 
         assert report["missing"] == [f"{base}.weights_proj"]
 
-    def test_qwen4_ngram_group32_is_priced_into_budget_plan(self):
-        from omlx.oq import _structural_quant_overrides
+    def test_qwen4_ngram_table_stays_outside_budget_plan(self):
+        from omlx.oq import _budgeted_shapes, _get_predicate_bits
 
         ple = (
             "language_model.model.layers.1.ple.ple_embedding."
@@ -1382,32 +1382,21 @@ class TestStreamingHelpers:
             "_oq_sensitivity_map": {"0": 1.0, "1": 0.5},
         }
 
-        unpriced = _build_quant_plan(
-            named_shapes,
-            config,
-            4,
-            target_bpw=4.6,
-            hard_cap_bpw=4.7,
-        )
-        fixed = _structural_quant_overrides(named_shapes, config, 4)
         plan = _build_quant_plan(
-            named_shapes,
+            _budgeted_shapes(named_shapes, config),
             config,
-            4,
-            target_bpw=4.6,
-            hard_cap_bpw=4.7,
-            fixed_overrides=fixed,
+            2.5,
+            target_bpw=3.1,
+            hard_cap_bpw=3.3,
         )
 
-        assert unpriced.effective_bpw > 5.5
-        assert fixed[ple] == {
-            "bits": 4,
-            "group_size": 32,
-            "mode": "affine",
-        }
-        assert plan.effective_bpw <= 4.7
         assert ple not in plan.boost_map
+        assert plan.effective_bpw <= 3.3
         assert plan.boost_map["language_model.lm_head"]["bits"] == 8
+        # The table keeps its own group-32 policy and never drops below 4 bits.
+        weight = f"{ple}.weight"
+        assert _get_predicate_bits(weight, config, 2.5, 64) == (4, 32, "affine")
+        assert _get_predicate_bits(weight, config, 6, 64) == (6, 32, "affine")
 
     def test_build_quant_plan_respects_hard_cap(self):
         named_shapes = {
@@ -7225,6 +7214,50 @@ class TestGlm5NextLayerWalk:
             collector.restore(model)
         assert linear_attention.fuse_in
 
+    def test_mtp_head_imatrix_hooks_execute(self):
+        from omlx.oq import _collect_mtp_head_imatrix, _run_glm5_next_mtp_blocks
+        from omlx.patches import mlx_vlm_glm5_next_compat
+        from omlx.patches.mlx_vlm_mtp import glm5_next_vlm_runtime
+        from tests.test_mlx_vlm_glm5_next_compat import _tiny_config
+
+        mlx_vlm_glm5_next_compat.apply_mlx_vlm_glm5_next_compat_patch()
+        assert glm5_next_vlm_runtime.apply()
+        from mlx_vlm.models.glm5_next import Model
+
+        config = _tiny_config()
+        config.text_config.index_topk = 2048
+        config.text_config.num_nextn_predict_layers = 1
+        model = Model(config)
+        language_model = model.language_model
+        # Past 8 rows, attention reads embed_q only through q_b_proj's hook.
+        tokens = mx.arange(1, 13, dtype=mx.int32)[None]
+        layers = language_model.model.layers
+        inputs = language_model.model.embed_tokens(tokens)
+        inputs, masks, state = _prepare_layer_inputs(model, layers, tokens, inputs)
+
+        collector = OQImatrixCollector()
+        collector.install(model)
+        try:
+            for layer_idx, layer in enumerate(layers):
+                inputs, _ = _forward_layer_result(
+                    layer, inputs, masks[layer_idx], state, layer_idx=layer_idx
+                )
+            assert _collect_mtp_head_imatrix(model, tokens, inputs)
+        finally:
+            collector.restore(model)
+        assert "language_model.mtp.0.eh_proj" in collector.entries
+
+        # The streamed collector installs the head alone under its entry prefix.
+        head = language_model.mtp[0]
+        collector = OQImatrixCollector()
+        collector.install(head, name_prefix="language_model.mtp.0.")
+        try:
+            embed = language_model.model.embed_tokens
+            _run_glm5_next_mtp_blocks([head], inputs, embed, tokens[:, 1:])
+        finally:
+            collector.restore(head)
+        assert "language_model.mtp.0.block.self_attn.embed_q" in collector.entries
+
 
 @pytest.mark.skipif(not HAS_MLX, reason="MLX not available")
 class TestInklingLayerWalk:
@@ -7546,6 +7579,7 @@ class TestStreamedCalibration:
         [
             (None, "llama", True, False),
             (None, "minimax_m3_vl", True, True),
+            (None, "glm5_next", True, True),
             (None, "qwen4_exp", False, False),
             (False, "qwen4_exp", True, False),
             (True, "qwen4_exp", False, True),

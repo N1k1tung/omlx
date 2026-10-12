@@ -13,6 +13,8 @@ import mlx.core as mx
 import mlx.nn as nn
 from mlx.utils import tree_flatten
 
+from ..patches.qwen35_yarn import apply_qwen35_yarn_patch, set_context_window
+
 logger = logging.getLogger(__name__)
 
 _VLM_TEXT_PREFIX = "language_model."
@@ -589,6 +591,11 @@ def maybe_apply_pre_load_patches(
     from ..patches.arrays_cache_extract import apply_arrays_cache_extract_guard
 
     apply_arrays_cache_extract_guard()
+
+    # Model-independent: honors yarn rope entries on every Qwen3.5-family
+    # attention, whatever model loaded first.
+    apply_qwen35_yarn_patch()
+    set_context_window(model_name, getattr(model_settings, "max_context_window", None))
 
     config_path = Path(model_name) / "config.json"
     if not config_path.exists():

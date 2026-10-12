@@ -11,9 +11,14 @@ from unittest.mock import MagicMock
 import mlx.core as mx
 import mlx.nn as nn
 import pytest
+from mlx_lm.models.rope_utils import initialize_rope
 
 from omlx import memory_monitor
 from omlx.patches import mlx_vlm_qwen4_exp_compat as compat
+from omlx.patches import qwen35_yarn
+
+compat.apply_mlx_vlm_qwen4_exp_compat_patch()
+qwen4_language = importlib.import_module("mlx_vlm.models.qwen4_exp.language")
 
 
 def _tiny_config():
@@ -108,6 +113,74 @@ def test_qwen4_exp_config_normalizes_reference_layer_type():
         "qwen_sparse_attention",
     ]
     assert config.text_config.rope_parameters["type"] == "default"
+
+
+def test_yarn_window_adds_rope_parameters_only_past_the_native_window(tmp_path):
+    def add(rope, model_type="qwen4_exp"):
+        config = {
+            "model_type": model_type,
+            "text_config": {"max_position_embeddings": 128, "rope_parameters": rope},
+        }
+        return qwen35_yarn.add_yarn_to_config(config, tmp_path)["text_config"][
+            "rope_parameters"
+        ]
+
+    default = {"rope_type": "default", "rope_theta": 10_000}
+    checkpoint = {"rope_type": "yarn", "factor": 2.0, "rope_theta": 10_000}
+    try:
+        qwen35_yarn.set_context_window(tmp_path, 128)
+        assert add(dict(default)) == default
+        qwen35_yarn.set_context_window(tmp_path, 200)
+        assert add(dict(default)) == {
+            **default,
+            "rope_type": "yarn",
+            "factor": 200 / 128,
+            "original_max_position_embeddings": 128,
+        }
+        assert add(dict(checkpoint)) == checkpoint
+        assert add(dict(default), model_type="llama") == default
+        both = add({"type": "default", "rope_type": "default"})
+        assert (both["type"], both["rope_type"]) == ("yarn", "yarn")
+    finally:
+        qwen35_yarn.set_context_window(tmp_path, None)
+
+
+def test_yarn_rotary_matches_mlx_lm_yarn_rope_and_is_shared_by_the_indexer():
+    qwen35_yarn.apply_qwen35_yarn_patch()
+    config = _tiny_config()
+    rope = {
+        **config.text_config.rope_parameters,
+        "type": "yarn",
+        "factor": 4.0,
+        "original_max_position_embeddings": 128,
+    }
+    config.text_config.rope_parameters = rope
+    model = qwen4_language.LanguageModel(config.text_config, config)
+    attn = next(layer.self_attn for layer in model.model.layers if not layer.is_linear)
+    rotary = attn.rotary_emb
+    yarn = initialize_rope(rotary.dim, rotary.base, False, rope, 128)
+
+    assert attn.indexer.rotary_emb is rotary
+    assert rotary.fused_apply is False
+    assert rotary.attention_scaling == yarn.mscale
+    mx.random.seed(0)
+    queries = mx.random.normal((1, 4, 3, 8))
+    keys = mx.random.normal((1, 2, 3, 8))
+    positions = [200, 300, 511]
+    position_ids = mx.broadcast_to(mx.array([positions])[None], (3, 1, 3))
+    # GPU sin/cos at these angles differ by ~1e-4 across chip families.
+    with mx.stream(mx.cpu):
+        rotated, _ = rotary.apply_rotary(
+            queries, keys, position_ids, cast_output=False
+        )
+        expected = mx.concatenate(
+            [
+                yarn(queries[:, :, i : i + 1], offset=p)
+                for i, p in enumerate(positions)
+            ],
+            axis=2,
+        )
+        assert mx.allclose(rotated, expected, atol=1e-5).item()
 
 
 def test_qwen4_exp_model_file_checkpoints_resolve_to_vendored_module(tmp_path):
