@@ -4384,7 +4384,6 @@ class _ChatTemplateMessages:
     messages: list[dict]
     is_partial: bool
     native_reasoning: bool
-    merge_system_fallback_roles: bool
 
 
 def _extract_chat_messages(
@@ -4416,7 +4415,6 @@ def _extract_chat_messages(
         engine, "supports_multimodal_fallback", False
     )
     extractor = getattr(engine, "message_extractor", None)
-    merge_system_fallback_roles = not (is_vlm or is_dflash_vlm)
     if extractor is not None:
         extractor_kwargs = {}
         try:
@@ -4430,7 +4428,6 @@ def _extract_chat_messages(
             engine.tokenizer,
             **extractor_kwargs,
         )
-        merge_system_fallback_roles = True
     elif is_vlm or is_dflash_vlm:
         # VLM or DFlash with VLM fallback: preserve image_url content parts
         messages = extract_multimodal_content(
@@ -4457,7 +4454,6 @@ def _extract_chat_messages(
         messages=messages,
         is_partial=is_partial,
         native_reasoning=native_reasoning,
-        merge_system_fallback_roles=merge_system_fallback_roles,
     )
 
 
@@ -4666,7 +4662,6 @@ async def create_chat_completion(
             tools=tools_for_template,
             chat_template_kwargs=merged_ct_kwargs or None,
             is_partial=is_partial,
-            merge_consecutive_roles=chat_messages.merge_system_fallback_roles,
             unsupported_mid_system_policy=_unsupported_mid_system_policy(),
         )
         # Validate context window before sending to model
@@ -7190,7 +7185,6 @@ async def create_anthropic_message(
         # Apply model-specific message extraction (e.g. Gemma 4 converts
         # role=tool messages into tool_responses on assistant turns).
         extractor = getattr(engine, "message_extractor", None)
-        merge_system_fallback_roles = not (is_vlm or is_dflash_vlm)
         if extractor is not None:
             extractor_kwargs = {}
             try:
@@ -7207,7 +7201,6 @@ async def create_anthropic_message(
                 engine.tokenizer,
                 **extractor_kwargs,
             )
-            merge_system_fallback_roles = True
 
         # Detect and strip partial mode at the API boundary — exactly once.
         is_partial = detect_and_strip_partial(messages)
@@ -7330,7 +7323,6 @@ async def create_anthropic_message(
             tools=internal_tools,
             chat_template_kwargs=merged_ct_kwargs or None,
             is_partial=is_partial,
-            merge_consecutive_roles=merge_system_fallback_roles,
             unsupported_mid_system_policy=_unsupported_mid_system_policy(),
         )
 
@@ -7654,7 +7646,6 @@ async def _tokenize_chat_messages(
         tools=tools_for_template,
         chat_template_kwargs=merged_ct_kwargs or None,
         is_partial=is_partial,
-        merge_consecutive_roles=chat_messages.merge_system_fallback_roles,
         unsupported_mid_system_policy=_unsupported_mid_system_policy(),
     )
     add_generation_prompt = (
@@ -8012,7 +8003,6 @@ async def create_response(
             tools=tools_for_template,
             chat_template_kwargs=merged_ct_kwargs or None,
             is_partial=False,
-            merge_consecutive_roles=True,
             unsupported_mid_system_policy=_unsupported_mid_system_policy(),
         )
 
