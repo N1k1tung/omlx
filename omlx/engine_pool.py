@@ -78,7 +78,11 @@ from .settings import get_settings as get_global_settings
 from .utils.fatal import exit_if_gpu_submissions_ignored
 from .utils.generation_config import SAMPLING_SETTING_KEYS, load_sampling_defaults
 from .utils.metal_sync import unreleased_graphics_bytes
-from .utils.model_loading import dflash_batched_requested, dflash_batched_supported
+from .utils.model_loading import (
+    dflash_batched_requested,
+    dflash_batched_supported,
+    lightning_mtp_supported,
+)
 from .utils.proc_memory import get_phys_footprint
 
 logger = logging.getLogger(__name__)
@@ -1438,7 +1442,8 @@ class EnginePool:
         """Apply persisted settings to discovered entries.
 
         Applies model_type_override, then saves the recommended sampling
-        settings of generation models that have no saved settings yet.
+        settings of generation models that have no saved settings yet. A
+        new checkpoint with Lightning MTP weights also starts with MTP on.
         """
         for model_id, entry in self._entries.items():
             settings = settings_manager.get_settings(model_id)
@@ -1457,18 +1462,28 @@ class EnginePool:
             if settings_manager.has_settings(model_id):
                 continue
             values = self.recommended_sampling_settings(entry)
+            if self._starts_with_lightning_mtp(entry):
+                values["mtp_enabled"] = True
             if values:
                 initial[model_id] = values
         try:
             added = settings_manager.add_initial_settings(initial)
         except OSError as e:
-            logger.warning(f"Could not save recommended sampling settings: {e}")
+            logger.warning(f"Could not save initial model settings: {e}")
             return
         for model_id in added:
-            logger.info(
-                f"Applied recommended sampling settings for {model_id}: "
-                f"{initial[model_id]}"
-            )
+            logger.info(f"Applied initial settings for {model_id}: {initial[model_id]}")
+
+    @classmethod
+    def _starts_with_lightning_mtp(cls, entry: EngineEntry) -> bool:
+        if (
+            entry.is_helper
+            or entry.source_type == "cluster"
+            or entry.model_type not in ("llm", "vlm")
+            or cls._entry_is_diffusion_model(entry)
+        ):
+            return False
+        return lightning_mtp_supported(entry.model_path)
 
     @classmethod
     def recommended_sampling_settings(cls, entry: EngineEntry) -> dict:
