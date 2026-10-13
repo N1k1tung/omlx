@@ -62,10 +62,11 @@ The armed verifier also fuses each residual add with the next RMSNorm
 (bit-exact to the separate ops) and submits the partial graph every few
 layers, so the GPU starts while the host still builds the verify.
 
-Numerics: fp32 accumulation in lane-strided K order differs from stock qmm
-at bf16 tail-ULP level. Greedy outputs can therefore occasionally diverge
-from the unrouted path (the token is still trunk-verified — the divergence
-class is the same as any kernel change).
+Numerics: fused projections and narrow mma calls keep stock FP32 affine
+weights and reduction order through the existing one-pass wide tile. The
+matrix tile is used only where stock qmm also rounds dequantized weights
+to the activation dtype. Other split-K/sg8 routes and matrix reductions
+can still differ from stock qmm at tail-ULP level.
 
 Supported: 4-bit and 8-bit affine, group_size in {32, 64, 128}, bf16/fp16
 activations, M in 3..6, K % 64 == 0, N % 4 == 0. The mma path takes 4-, 5-
@@ -76,7 +77,9 @@ falls back to stock.
 from __future__ import annotations
 
 import logging
+import re
 import threading
+from functools import cache
 
 logger = logging.getLogger(__name__)
 
@@ -953,13 +956,75 @@ def mma_eligible(M: int, K: int, N: int, bits: int, group_size: int, dtype) -> b
     )
 
 
+@cache
+def _stock_qmv_wide_limit(K: int, N: int):
+    """First tiled-qmm row count; None when the exact wide kernel is unsupported."""
+    import mlx.core as mx
+
+    from .mlx_vlm_glm5_next_compat.decode_kernels import fused_decode_supported
+
+    if not fused_decode_supported():
+        return None
+    arch = str(mx.device_info()["architecture"])
+    size = 0 if max(K, N) <= 2048 else 1 if max(K, N) <= 4096 else 2
+    # Matches MLX 0.32.3 get_qmv_batch_limit; update with the MLX pin.
+    if arch.endswith("d"):
+        return (32, 18, 12)[size]
+    generation = int(re.match(r"applegpu_g(\d+)", arch)[1])
+    return ((33, 25, 13) if generation >= 17 else (13, 15, 13))[size]
+
+
+def _vk_qmm_wide(x2, w_q, scales, biases, *, bits: int, group_size: int):
+    """Keep stock FP32 dequantization and reductions while sharing a weight pass."""
+    import mlx.core as mx
+
+    from .mlx_vlm_glm5_next_compat.decode_kernels import (
+        _multi_qmv_kernel,
+        fused_decode_supported,
+    )
+
+    M, K = x2.shape
+    N = w_q.shape[0]
+    # The one-pass tile covers eight rows. Wider verifies keep native qmm
+    # until a tile with a bounded register footprint is profitable there.
+    if (
+        M > 8
+        or N % 8
+        or K in (64, 128)
+        or not fused_decode_supported()
+        or scales.dtype != x2.dtype
+        or biases.dtype != x2.dtype
+    ):
+        return mx.quantized_matmul(
+            x2, w_q, scales, biases, transpose=True, bits=bits, group_size=group_size
+        )
+    return _multi_qmv_kernel(1, M)(
+        inputs=[x2, w_q, scales, biases],
+        template=[
+            ("T", x2.dtype), ("K", K), ("BITS", bits), ("GS", group_size),
+            ("N0", N), ("N1", 0), ("N2", 0), ("N3", 0),
+        ],
+        grid=(64 * (N // 8), 1, 1),
+        threadgroup=(64, 1, 1),
+        output_shapes=[(M, N)],
+        output_dtypes=[x2.dtype],
+    )[0]
+
+
 def vk_qmm_mma(x2, w_q, scales, biases, *, group_size: int, bits: int = 4):
-    """(M, K) x (N, K)^T -> (M, N) for M in 7..24 through the mma tile kernel."""
+    """(M, K) x (N, K)^T for M in 7..24, preserving stock's weight precision."""
     import mlx.core as mx
 
     M = int(x2.shape[0])
     K = int(x2.shape[1])
     N = int(w_q.shape[0])
+    limit = _stock_qmv_wide_limit(K, N)
+    if limit is None or M < limit:
+        # Stock's vector path keeps affine weights in FP32. Rounding them
+        # into the MMA's T tile changes the effective weights at these rows.
+        return _vk_qmm_wide(
+            x2, w_q, scales, biases, bits=bits, group_size=group_size
+        )
     row_tiles = (M + 7) // 8
     bm = 8 * row_tiles
     xm, M0 = _pad_rows(mx, x2, bm)
@@ -1078,6 +1143,13 @@ def verify_fused_qmm(
     if route is None:
         return None
     x2 = x.reshape(rows, K)
+    limit = _stock_qmv_wide_limit(K, N)
+    if limit is None:
+        return None
+    if rows < limit:
+        return _vk_qmm_wide(
+            x2, w_q, scales, biases, bits=int(bits), group_size=int(group_size)
+        ).reshape(batch, length, N)
     if route == "sg8":
         y = vk_qmm_sg8(
             x2, w_q, scales, biases, group_size=int(group_size), bits=int(bits),

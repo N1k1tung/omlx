@@ -5600,15 +5600,52 @@ def test_verify_qmm_routes_batched_rows_through_mma_kernel(
     assert mx.abs(out - expected).max().item() <= tolerance
 
 
+@pytest.mark.parametrize("dtype", [mx.bfloat16, mx.float16])
+@pytest.mark.parametrize("rows", [7, 8])
+@pytest.mark.parametrize("group_size", [32, 64, 128])
+def test_verify_mma_preserves_fp32_affine_weights(monkeypatch, dtype, rows, group_size):
+    """A premature weight cast loses a full output ULP after cancellation."""
+    from omlx.patches import qwen35_verify_qmm as vq
+
+    K, N = 512, 288
+    weight = mx.full((N, K // 4), 0x80808080, dtype=mx.uint32)
+    weight[:, 0] = 0x80808081  # codes 129, 128, ...
+    step = 1 / (128 if dtype == mx.bfloat16 else 1024)
+    scales = mx.full((N, K // group_size), 1 + step, dtype=dtype)
+    biases = mx.full(
+        (N, K // group_size), -128 if dtype == mx.bfloat16 else -127, dtype=dtype
+    )
+    x = mx.zeros((rows, K), dtype=dtype)
+    x[:, 0], x[:, 1] = 1, -1
+    expected = mx.quantized_matmul(
+        x, weight, scales, biases, transpose=True, bits=8, group_size=group_size
+    )
+    actual = vq.vk_qmm_mma(
+        x, weight, scales, biases, bits=8, group_size=group_size
+    )
+    mx.eval(actual, expected)
+    assert mx.array_equal(
+        expected, mx.full((rows, N), 1 + step, dtype=dtype)
+    ).item()
+    assert mx.array_equal(actual, expected).item()
+    monkeypatch.setattr(vq, "_MIN_MMA_ROUTE_N", 256)
+    monkeypatch.setattr(vq, "_is_armed", lambda: True)
+    fused = vq.verify_fused_qmm(
+        x[None], weight, scales, biases, bits=8, group_size=group_size
+    )
+    if vq._stock_qmv_wide_limit(K, N) is not None:
+        assert mx.array_equal(fused[0], expected).item()
+
+
 @pytest.mark.parametrize("bits", [4, 5, 8])
 @pytest.mark.parametrize("batch,length", [(1, 8), (2, 6), (1, 16), (2, 8), (1, 24)])
 def test_mma_kernel_8bit_matches_quantized_matmul(batch, length, bits):
-    """The mma tile kernel covers 8-bit weights at verify rows 7..24."""
+    """Wide and matrix verify paths cover 8-bit weights at rows 7..24."""
     from omlx.patches import qwen35_verify_qmm as vq
 
     mx.random.seed(11)
-    layer = nn.QuantizedLinear(512, 288, bits=bits, group_size=64)
-    weight = (mx.random.normal((288, 512)) * 0.02).astype(mx.bfloat16)
+    layer = nn.QuantizedLinear(512, 4096, bits=bits, group_size=64)
+    weight = (mx.random.normal((4096, 512)) * 0.02).astype(mx.bfloat16)
     layer.weight, layer.scales, layer.biases = mx.quantize(
         weight, group_size=64, bits=bits
     )
@@ -5621,7 +5658,7 @@ def test_mma_kernel_8bit_matches_quantized_matmul(batch, length, bits):
         transpose=True,
         group_size=64,
         bits=bits,
-    ).reshape(batch * length, 288).astype(mx.float32)
+    ).reshape(batch * length, 4096).astype(mx.float32)
     y = vq.vk_qmm_mma(
         x.reshape(batch * length, 512),
         layer.weight,
@@ -5631,7 +5668,7 @@ def test_mma_kernel_8bit_matches_quantized_matmul(batch, length, bits):
         bits=bits,
     )
     mx.eval(y, expected)
-    assert y.shape == (batch * length, 288)
+    assert y.shape == (batch * length, 4096)
     tolerance = 2.0 * mx.abs(expected).max().item() / 256 + 1e-2
     assert mx.abs(y.astype(mx.float32) - expected).max().item() <= tolerance
 
@@ -5683,6 +5720,25 @@ def test_verify_fused_qmm_routes_concatenated_projections(monkeypatch, batch, le
     bw, bs, bb = mx.quantize(bad, group_size=64, bits=bits)
     x_bad = (mx.random.normal((batch, length, 384)) * 0.5).astype(mx.bfloat16)
     assert vq.verify_fused_qmm(x_bad, bw, bs, bb, **kwargs) is None
+
+
+def test_verify_fused_qmm_preserves_partial_output_tile(monkeypatch):
+    """The split-K layout permits four columns beyond the exact wide tile."""
+    from omlx.patches import qwen35_verify_qmm as vq
+
+    monkeypatch.setattr(vq, "_MIN_ROUTE_N", 128)
+    monkeypatch.setattr(vq, "_is_armed", lambda: True)
+    weight = (mx.random.normal((132, 512)) * 0.02).astype(mx.bfloat16)
+    w, s, b = mx.quantize(weight, bits=8, group_size=64)
+    x = mx.ones((1, 3, 512), dtype=mx.bfloat16)
+    actual = vq.verify_fused_qmm(x, w, s, b, bits=8, group_size=64)
+    if actual is None:
+        return
+    expected = mx.quantized_matmul(
+        x, w, s, b, transpose=True, bits=8, group_size=64
+    )
+    mx.eval(actual, expected)
+    assert mx.array_equal(actual, expected).item()
 
 
 @pytest.mark.parametrize("dtype", [mx.bfloat16, mx.float16])
