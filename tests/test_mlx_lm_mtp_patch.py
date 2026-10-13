@@ -2080,24 +2080,30 @@ class TestMtpCompatibilityHelpers:
 
 class TestRowExactVerifyGate:
     @pytest.mark.parametrize("batch, armed", [(1, True), (4, False)])
-    def test_row_exact_verify_arms_single_stream_only(self, monkeypatch, batch, armed):
+    @pytest.mark.parametrize(
+        "target_type", [None, "qwen3_5", "glm5_next", "glm5_next_text"]
+    )
+    def test_row_exact_verify_arms_single_stream_only(self, batch, armed, target_type):
+        from omlx.patches import qwen35_verify_qmm as vq
+
         # B > 1 verify has no one-row decode to match, and row-exact would run
         # its B x R rows one by one.
-        calls = []
-        monkeypatch.setattr(
-            bg,
-            "_set_verify_qmm_armed",
-            lambda flag, *, row_exact=False: calls.append((flag, row_exact)),
-        )
-
         class _Model:
             _omlx_mtp_row_exact_verify = True
+            model_type = target_type
 
             def __call__(self, inputs, **kwargs):
+                assert vq.is_row_exact_armed() is armed
+                assert vq._is_armed() is not armed
+                assert vq._glm5_next_armed() == (
+                    target_type in {"glm5_next", "glm5_next_text"}
+                )
                 return mx.zeros((*inputs.shape, 8)), mx.zeros((*inputs.shape, 4))
 
         bg._call_backbone(_Model(), mx.zeros((batch, 4), dtype=mx.int32), [])
-        assert calls[0] == (True, armed)
+        assert not vq.is_row_exact_armed()
+        assert not vq._is_armed()
+        assert not vq._glm5_next_armed()
 
 
 class TestPreLoadPatchDispatch:
@@ -5607,6 +5613,7 @@ def test_verify_mma_preserves_fp32_affine_weights(monkeypatch, dtype, rows, grou
     """A premature weight cast loses a full output ULP after cancellation."""
     from omlx.patches import qwen35_verify_qmm as vq
 
+    monkeypatch.setattr(vq, "_glm5_next_armed", lambda: True)
     K, N = 512, 288
     weight = mx.full((N, K // 4), 0x80808080, dtype=mx.uint32)
     weight[:, 0] = 0x80808081  # codes 129, 128, ...
@@ -5639,10 +5646,11 @@ def test_verify_mma_preserves_fp32_affine_weights(monkeypatch, dtype, rows, grou
 
 @pytest.mark.parametrize("bits", [4, 5, 8])
 @pytest.mark.parametrize("batch,length", [(1, 8), (2, 6), (1, 16), (2, 8), (1, 24)])
-def test_mma_kernel_8bit_matches_quantized_matmul(batch, length, bits):
+def test_mma_kernel_8bit_matches_quantized_matmul(monkeypatch, batch, length, bits):
     """Wide and matrix verify paths cover 8-bit weights at rows 7..24."""
     from omlx.patches import qwen35_verify_qmm as vq
 
+    monkeypatch.setattr(vq, "_glm5_next_armed", lambda: True)
     mx.random.seed(11)
     layer = nn.QuantizedLinear(512, 4096, bits=bits, group_size=64)
     weight = (mx.random.normal((4096, 512)) * 0.02).astype(mx.bfloat16)
@@ -5697,6 +5705,7 @@ def test_verify_fused_qmm_routes_concatenated_projections(monkeypatch, batch, le
     # Disarmed: stock qmm, helper declines.
     assert vq.verify_fused_qmm(x, w_q, scales, biases, **kwargs) is None
 
+    monkeypatch.setattr(vq, "_glm5_next_armed", lambda: True)
     monkeypatch.setattr(vq, "_is_armed", lambda: True)
     routed = vq.verify_fused_qmm(x, w_q, scales, biases, **kwargs)
     if rows < 3:
@@ -5739,6 +5748,33 @@ def test_verify_fused_qmm_preserves_partial_output_tile(monkeypatch):
     )
     mx.eval(actual, expected)
     assert mx.array_equal(actual, expected).item()
+
+
+@pytest.mark.parametrize("model_type", ["glm5_next", "glm5_next_text"])
+def test_verify_qmm_family_isolation(model_type):
+    """The glm5_next verify routes stay scoped to that family.
+
+    Other target model types keep the pre-glm5 dispatch:
+    8-bit weights stay on the stock qmm at mma rows (the Qwen3.8 in_proj_qkv
+    shape), and 4/5-bit routes are family-independent. GLM model types enable
+    the extended routes, and the type rides the arm call and clears on disarm.
+    """
+    from omlx.patches import qwen35_verify_qmm as vq
+
+    assert vq._verify_route(8, 5120, 10240, 8, 64, mx.bfloat16) is None
+    assert vq._verify_route(16, 5120, 10240, 8, 64, mx.bfloat16) is None
+    assert vq._verify_route(8, 512, 4096, 4, 64, mx.bfloat16) == "sg8"
+    assert vq._verify_route(12, 512, 4096, 4, 64, mx.bfloat16) == "mma"
+
+    vq.set_verify_qmm_armed(True, model_type=model_type)
+    try:
+        assert vq._glm5_next_armed()
+        assert vq._verify_route(8, 5120, 10240, 8, 64, mx.bfloat16) == "mma"
+        assert vq._verify_route(16, 5120, 10240, 8, 64, mx.bfloat16) == "mma"
+    finally:
+        vq.set_verify_qmm_armed(False)
+    assert not vq._glm5_next_armed()
+    assert vq._verify_route(8, 5120, 10240, 8, 64, mx.bfloat16) is None
 
 
 @pytest.mark.parametrize("dtype", [mx.bfloat16, mx.float16])

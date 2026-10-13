@@ -69,9 +69,9 @@ to the activation dtype. Other split-K/sg8 routes and matrix reductions
 can still differ from stock qmm at tail-ULP level.
 
 Supported: 4-bit and 8-bit affine, group_size in {32, 64, 128}, bf16/fp16
-activations, M in 3..6, K % 64 == 0, N % 4 == 0. The mma path takes 4-, 5-
-and 8-bit affine, M in 7..24, K % 256 == 0, N % 16 == 0. Everything else
-falls back to stock.
+activations, M in 3..6, K % 64 == 0, N % 4 == 0. The mma path takes 4- and
+5-bit affine for every family and 8-bit affine for glm5_next forwards,
+M in 7..24, K % 256 == 0, N % 16 == 0. Everything else falls back to stock.
 """
 
 from __future__ import annotations
@@ -103,16 +103,29 @@ _MIN_SG8_ROUTE_N = 1024
 _SG8_MIN_ROWS = 4
 
 
-def set_verify_qmm_armed(flag: bool, *, row_exact: bool = False) -> None:
+def set_verify_qmm_armed(
+    flag: bool, *, row_exact: bool = False, model_type: str | None = None
+) -> None:
     """Arm/disarm verify-qmm routing (MTP verify forwards only).
 
     ``row_exact`` arms the row-exact mode instead: every multi-row
     ``nn.QuantizedLinear`` call runs ``row_exact_qmv`` (one-row decode
     arithmetic per row) and the fast verify kernels below stay disarmed.
+
+    ``model_type`` is the target's existing model type. Only ``glm5_next``
+    and ``glm5_next_text`` forwards may take the 8-bit mma and exact wide
+    tiles, so every other family keeps the stock-qmm dispatch those routes
+    replaced.
     """
     _ROUTE_ARMED.value = bool(flag) and not row_exact
     _ROUTE_ARMED.row_exact = bool(flag) and bool(row_exact)
+    _ROUTE_ARMED.model_type = model_type if flag else None
     _ROUTE_ARMED.layers = 0
+
+
+def _glm5_next_armed() -> bool:
+    """Whether the armed forward belongs to the glm5_next family."""
+    return getattr(_ROUTE_ARMED, "model_type", None) in {"glm5_next", "glm5_next_text"}
 
 
 def _is_armed() -> bool:
@@ -1018,13 +1031,15 @@ def vk_qmm_mma(x2, w_q, scales, biases, *, group_size: int, bits: int = 4):
     M = int(x2.shape[0])
     K = int(x2.shape[1])
     N = int(w_q.shape[0])
-    limit = _stock_qmv_wide_limit(K, N)
-    if limit is None or M < limit:
-        # Stock's vector path keeps affine weights in FP32. Rounding them
-        # into the MMA's T tile changes the effective weights at these rows.
-        return _vk_qmm_wide(
-            x2, w_q, scales, biases, bits=bits, group_size=group_size
-        )
+    if _glm5_next_armed():
+        limit = _stock_qmv_wide_limit(K, N)
+        if limit is None or M < limit:
+            # Stock's vector path keeps affine weights in FP32. Rounding them
+            # into the MMA's T tile changes the effective weights at these
+            # rows. Other families keep the matrix tile at every row.
+            return _vk_qmm_wide(
+                x2, w_q, scales, biases, bits=bits, group_size=group_size
+            )
     row_tiles = (M + 7) // 8
     bm = 8 * row_tiles
     xm, M0 = _pad_rows(mx, x2, bm)
@@ -1641,7 +1656,11 @@ def _verify_route(rows: int, K: int, N: int, bits: int, group_size: int, dtype):
     for the stock qmm."""
     if sg8_eligible(rows, K, N, bits, group_size, dtype):
         return "sg8"
-    if mma_eligible(rows, K, N, bits, group_size, dtype):
+    # The 8-bit mma tile is a glm5_next-family route; other families keep
+    # the stock qmm that handled 8-bit weights before it existed.
+    if (bits != 8 or _glm5_next_armed()) and mma_eligible(
+        rows, K, N, bits, group_size, dtype
+    ):
         return "mma"
     if rows <= 6 and vk_eligible(rows, K, N, bits, group_size, dtype):
         return "vk"

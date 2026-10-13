@@ -326,7 +326,8 @@ class DFlashDrafter:
         # The drafter's projections see rows x block inputs like a verify
         # forward, so the same small-M kernels apply.
         started = time.perf_counter()
-        set_verify_qmm_armed(True)
+        target = getattr(jobs[0][0], "model", None) if jobs else None
+        set_verify_qmm_armed(True, model_type=getattr(target, "model_type", None))
         try:
             proposals = self._draft_batched(rows)
         finally:
@@ -362,7 +363,10 @@ class DFlashDrafter:
         sampler = None
         if gen_batch is not None and not bg._is_greedy(gen_batch):
             sampler = bg._resolve_draft_sampler(gen_batch, state)
-        set_verify_qmm_armed(True)
+        set_verify_qmm_armed(
+            True,
+            model_type=getattr(getattr(gen_batch, "model", None), "model_type", None),
+        )
         try:
             proposals = self._draft_batched(
                 [(state, row, context, anchor.reshape(1).astype(mx.int32), sampler)],
