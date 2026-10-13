@@ -72,6 +72,17 @@ def fused_quantized_matmul(
     group_size: int,
 ) -> mx.array:
     """Route a concatenated projection through the same native affine tile."""
+    if x.ndim == 3:
+        # The fused KDA in-proj and its grouped variant bypass
+        # nn.QuantizedLinear, so the armed verify-qmm patch never sees them;
+        # route them here explicitly (None keeps the stock qmm).
+        from omlx.patches.qwen35_verify_qmm import verify_fused_qmm
+
+        routed = verify_fused_qmm(
+            x, weight, scales, biases, bits=int(bits), group_size=int(group_size)
+        )
+        if routed is not None:
+            return routed
     min_tokens = 1024 if bits == 8 else 128
     if (
         x.ndim >= 2

@@ -44,16 +44,6 @@ thread-local flag (set by
 ``omlx.patches.mlx_lm_mtp.batch_generator._call_backbone``) so nothing else
 in the process sees the patched ``nn.QuantizedLinear``.
 
-Numerics: fp32 accumulation in lane-strided K order differs from stock qmm
-at bf16 tail-ULP level. Greedy outputs can therefore occasionally diverge
-from the unrouted path (the token is still trunk-verified — the divergence
-class is the same as any kernel change).
-
-Supported: 4-bit and 8-bit affine, group_size in {32, 64, 128}, bf16/fp16
-activations, M in 3..6, K % 64 == 0, N % 4 == 0. The mma path takes 4-bit
-and 5-bit affine, M in 7..24, K % 256 == 0, N % 16 == 0. Everything else falls back to
-stock.
-
 Blocks of four to eight rows (DFlash and Lightning MTP verifies) take
 ``sg8`` instead: bf16 rows, 4- or 5-bit weights, N >= 1024. Each lane builds its simdgroup-matrix
 operands in registers from one packed word per 32 inputs (bf16 ``128 + q``,
@@ -62,9 +52,25 @@ exact), so no threadgroup dequant tile is needed; the group fold removes
 share one launch (``vk_group_sg8``, mixed bit widths allowed) and the dense
 MLP's gate/up/SiLU is one launch (``vk_swiglu_sg8``).
 
+Projections that bypass ``nn.QuantizedLinear`` (GLM's fused KDA input
+projection and its grouped variant call ``fused_quantized_matmul`` directly)
+take ``verify_fused_qmm``: the same routes against the concatenated weight,
+so the largest width-insensitive verify matmul stops paying the stock qmm
+per-row penalty at every draft width.
+
 The armed verifier also fuses each residual add with the next RMSNorm
 (bit-exact to the separate ops) and submits the partial graph every few
 layers, so the GPU starts while the host still builds the verify.
+
+Numerics: fp32 accumulation in lane-strided K order differs from stock qmm
+at bf16 tail-ULP level. Greedy outputs can therefore occasionally diverge
+from the unrouted path (the token is still trunk-verified — the divergence
+class is the same as any kernel change).
+
+Supported: 4-bit and 8-bit affine, group_size in {32, 64, 128}, bf16/fp16
+activations, M in 3..6, K % 64 == 0, N % 4 == 0. The mma path takes 4-, 5-
+and 8-bit affine, M in 7..24, K % 256 == 0, N % 16 == 0. Everything else
+falls back to stock.
 """
 
 from __future__ import annotations
@@ -437,6 +443,19 @@ def _build_mma_kernel(
                     uint32_t nib = (packed >> (ki * 4)) & 0xFu;
                     B_tile[sg_id][(dq_k * 8 + ki) * BN + dq_n] = T(float(nib) * s + b);
                 }"""
+    elif bits == 8:
+        # MLX 8-bit affine: four codes per uint32, so one 8-value k row
+        # reads the word at k_base / 4 and its successor.
+        unpack = """
+                uint32_t packed = w_q[n_global * K_by_4 + (k_base >> 2)];
+                uint32_t packed2 = w_q[n_global * K_by_4 + (k_base >> 2) + 1];
+                _Pragma("unroll")
+                for (int ki = 0; ki < 4; ++ki) {
+                    uint32_t va = (packed >> (ki * 8)) & 0xFFu;
+                    uint32_t vb = (packed2 >> (ki * 8)) & 0xFFu;
+                    B_tile[sg_id][(dq_k * 8 + ki) * BN + dq_n] = T(float(va) * s + b);
+                    B_tile[sg_id][(dq_k * 8 + ki + 4) * BN + dq_n] = T(float(vb) * s + b);
+                }"""
     else:
         # MLX 5-bit affine: eight values per five little-endian bytes.
         unpack = """
@@ -481,6 +500,7 @@ def _build_mma_kernel(
         constexpr int GS = {group_size};
         constexpr int K = {int(k_val)};
         constexpr int K_by_8 = K / 8;
+        constexpr int K_by_4 = K / 4;
         constexpr int K_by_gs = K / GS;
         constexpr int K_chunk = K / NSG;
 
@@ -922,7 +942,7 @@ def mma_eligible(M: int, K: int, N: int, bits: int, group_size: int, dtype) -> b
     import mlx.core as mx
 
     return (
-        int(bits) in (4, 5)
+        int(bits) in (4, 5, 8)
         and int(group_size) in (32, 64, 128)
         and dtype in (mx.bfloat16, mx.float16)
         # Above 24 rows stock qmm fills its 32-row tile and wins.
@@ -1011,6 +1031,65 @@ def vk_qmm(x2, w_q, scales, biases, *, bits: int, group_size: int):
         output_dtypes=[x2.dtype],
     )
     return y[:M0, :] if M0 < m else y
+
+
+def verify_fused_qmm(
+    x,
+    w_q,
+    scales,
+    biases,
+    *,
+    bits: int,
+    group_size: int,
+):
+    """Armed verify route for a projection that bypasses ``nn.QuantizedLinear``.
+
+    GLM's fused KDA input projection (and its grouped variant) concatenate
+    q|k|v|f_a|g_a|b into one affine weight and call ``fused_quantized_matmul``
+    directly, so the patched ``__call__`` never sees them and every verify
+    width paid the stock qmm per-row penalty. This applies the same
+    ``_verify_route`` selection to the raw (weight, scales, biases) triple.
+
+    ``x`` is [B, L, K]; returns [B, L, N], or None unless the verify flag is
+    armed, rows = B * L is 3..24, and the layout takes a kernel. The caller
+    keeps the stock qmm then.
+    """
+    import mlx.core as mx
+
+    if not _is_armed() or is_row_exact_armed() or x.ndim != 3:
+        return None
+    batch, length, K = (int(v) for v in x.shape)
+    rows = batch * length
+    if rows < 3:
+        # Decode (and depth-1 verifies) keep the stock path bit-identical,
+        # like the patched QuantizedLinear route.
+        return None
+    N = int(scales.shape[0])
+    if (
+        x.dtype not in (mx.bfloat16, mx.float16)
+        or int(w_q.shape[0]) != N
+        or int(w_q.shape[1]) * 32 != K * int(bits)
+        or int(scales.shape[1]) * int(group_size) != K
+        or scales.dtype != x.dtype
+        or biases.dtype != x.dtype
+    ):
+        return None
+    route = _verify_route(rows, K, N, int(bits), int(group_size), x.dtype)
+    if route is None:
+        return None
+    x2 = x.reshape(rows, K)
+    if route == "sg8":
+        y = vk_qmm_sg8(
+            x2, w_q, scales, biases, group_size=int(group_size), bits=int(bits),
+            sums=group_sums_for(x),
+        )
+    elif route == "mma":
+        y = vk_qmm_mma(
+            x2, w_q, scales, biases, group_size=int(group_size), bits=int(bits)
+        )
+    else:
+        y = vk_qmm(x2, w_q, scales, biases, bits=int(bits), group_size=int(group_size))
+    return y.reshape(batch, length, N)
 
 
 def vk_eligible(M: int, K: int, N: int, bits: int, group_size: int, dtype) -> bool:
