@@ -13,6 +13,7 @@ import mlx.core as mx
 import mlx.nn as nn
 from mlx.utils import tree_flatten
 
+from ..patches.arrays_cache_metadata import apply_arrays_cache_metadata_patch
 from ..patches.qwen35_yarn import apply_qwen35_yarn_patch, set_context_window
 
 logger = logging.getLogger(__name__)
@@ -591,6 +592,10 @@ def maybe_apply_pre_load_patches(
     from ..patches.arrays_cache_extract import apply_arrays_cache_extract_guard
 
     apply_arrays_cache_extract_guard()
+
+    # Model-independent: unused ArraysCache padding metadata otherwise grows
+    # lazy graphs until a long-lived BatchGenerator hits the Metal resource limit.
+    apply_arrays_cache_metadata_patch()
 
     # Model-independent: honors yarn rope entries on every Qwen3.5-family
     # attention, whatever model loaded first.
