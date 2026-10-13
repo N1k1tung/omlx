@@ -757,6 +757,7 @@ def test_glm_dflash_generation_and_warm_image_prefix_match_greedy(
         return embed(inputs)
 
     def rejected_drafts(*args, **kwargs):
+        assert dd.qwen35_verify_qmm._glm5_next_armed()
         return [
             (mx.full(tokens.shape, wrong, dtype=tokens.dtype), accept)
             for tokens, accept in draft_batched(*args, **kwargs)
