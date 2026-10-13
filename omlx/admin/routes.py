@@ -95,6 +95,7 @@ from ..websearch import (
     run_web_search_test,
 )
 from ..websearch import SUPPORTED_PROVIDERS as SUPPORTED_WEB_SEARCH_PROVIDERS
+from . import model_recommender
 from .auth import (
     REMEMBER_ME_MAX_AGE,
     SESSION_MAX_AGE,
@@ -7753,6 +7754,46 @@ async def get_recommended_models(
         )
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
+
+
+def _free_disk_bytes(path: str | Path) -> int:
+    """Free bytes on the volume holding `path` (or its nearest existing parent)."""
+    try:
+        check_path = Path(path).expanduser().resolve()
+        while not check_path.exists() and check_path.parent != check_path:
+            check_path = check_path.parent
+        return shutil.disk_usage(check_path).free
+    except OSError:
+        return 0
+
+
+@router.get("/api/hf/recommendations")
+async def get_model_recommendations(
+    is_admin: bool = Depends(require_admin),
+):
+    """oQ models that fit this Mac, grouped for the downloader's Recommended tab."""
+    if _hf_downloader is None:
+        raise HTTPException(status_code=503, detail="Downloader not initialized")
+
+    global_settings = _get_global_settings() if _get_global_settings else None
+    try:
+        result = await model_recommender.recommendations(
+            getattr(global_settings, "memory", None)
+        )
+    except TimeoutError as e:
+        raise HTTPException(
+            status_code=504,
+            detail="HuggingFace API request timed out. The service may be temporarily unavailable.",
+        ) from e
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
+
+    model_dir = _hf_downloader.model_dir
+    result["disk"] = {
+        "model_dir": str(model_dir),
+        "free_bytes": await asyncio.to_thread(_free_disk_bytes, model_dir),
+    }
+    return result
 
 
 @router.get("/api/hf/search")

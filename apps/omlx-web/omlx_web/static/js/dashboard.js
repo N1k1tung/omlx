@@ -101,6 +101,7 @@
     const DASHBOARD_SETTINGS_TABS = new Set(['global', 'integrations', 'models']);
     const DASHBOARD_MODELS_TABS = new Set(['manager', 'downloader', 'quantizer', 'uploader']);
     const DASHBOARD_BENCH_TABS = new Set(['throughput', 'accuracy', 'context']);
+    const DASHBOARD_DOWNLOADER_SOURCES = new Set(['hf', 'ms', 'recommended']);
     const THEME_STORAGE_KEY = 'omlx-chat-theme';
     const ENHANCED_READABILITY_KEY = 'omlx-enhanced-readability';
 
@@ -554,6 +555,20 @@
             hfModelDetail: null,
             hfModelDetailLoading: false,
 
+            // Recommended (hardware-aware oQ picks) state
+            recommendations: null,
+            recommendationsLoading: false,
+            recommendationsError: '',
+            recommendationsApplying: false,
+            // null follows the default: open unless the Mac has 16 GB or less.
+            recommendationsUnlockOpen: null,
+
+            // First-run banner. Only shown when the first model list was empty;
+            // dismissing hides it until the next page load.
+            onboardingStartedEmpty: false,
+            onboardingDismissed: false,
+            onboardingReadyDismissed: false,
+
             // ModelScope Downloader state
             downloaderSource: 'hf',
             msAvailable: false,
@@ -789,6 +804,12 @@
 
                 this.startUpdateCheckTimer();
 
+                this.onboardingStartedEmpty = !this.hasUserModels;
+                if (this.onboardingStartedEmpty
+                    && !new URLSearchParams(window.location.search).has('source')) {
+                    this.downloaderSource = 'recommended';
+                }
+
                 await this.handleMainTabChange(this.mainTab);
                 this.settingsScrollToHash();
 
@@ -874,6 +895,9 @@
                     if (this.modelsTab === 'downloader' && !this.hfRecommendedLoaded) {
                         loads.push(this.loadRecommendedModels());
                     }
+                    if (this.modelsTab === 'downloader' && this.downloaderSource === 'recommended') {
+                        loads.push(this.loadRecommendations());
+                    }
                     if (this.modelsTab === 'quantizer') {
                         loads.push(this.loadOQModels());
                     }
@@ -902,6 +926,11 @@
                     await this.loadAccState();
                     await this.loadCtxBenchState();
                 }
+                // The first-run banner shows download progress on the dashboard.
+                if (value === 'status' && this.onboardingStartedEmpty) {
+                    await this.loadHFTasks();
+                    if (this.onboardingTask) this.startHFRefresh();
+                }
             },
 
             applyTabStateFromUrl() {
@@ -916,6 +945,8 @@
                 this.activeTab = DASHBOARD_SETTINGS_TABS.has(settingsTab) ? settingsTab : 'global';
                 this.modelsTab = DASHBOARD_MODELS_TABS.has(modelsTab) ? modelsTab : 'manager';
                 this.benchTab = DASHBOARD_BENCH_TABS.has(benchTab) ? benchTab : 'throughput';
+                const source = params.get('source');
+                if (DASHBOARD_DOWNLOADER_SOURCES.has(source)) this.downloaderSource = source;
 
                 // A section anchor opens global settings unless the URL names another tab.
                 const section = window.location.hash.slice(1);
@@ -940,6 +971,12 @@
                     url.searchParams.set('modelsTab', this.modelsTab);
                 } else {
                     url.searchParams.delete('modelsTab');
+                }
+
+                if (this.mainTab === 'models' && this.modelsTab === 'downloader') {
+                    url.searchParams.set('source', this.downloaderSource);
+                } else {
+                    url.searchParams.delete('source');
                 }
 
                 if (this.mainTab === 'bench') {
@@ -1123,6 +1160,22 @@
                     if (!this.uploadOqModelsLoaded) this.loadUploadOqModels();
                     this.loadUploadTasks();
                 }
+                if (tab === 'downloader' && this.downloaderSource === 'recommended') {
+                    this.loadRecommendations();
+                }
+            },
+
+            setDownloaderSource(source) {
+                if (!DASHBOARD_DOWNLOADER_SOURCES.has(source)) return;
+                this.downloaderSource = source;
+                this.syncTabStateToUrl();
+                if (source === 'ms') this.initMsDownloader();
+                if (source === 'recommended') this.loadRecommendations();
+            },
+
+            openRecommendations() {
+                this.downloaderSource = 'recommended';
+                this.setModelsTab('downloader');
             },
 
            async checkForUpdate() {
@@ -6453,8 +6506,7 @@
             // the user clicks rapidly.
             wiredLimitCopied: false,
 
-            copyWiredLimitCommand() {
-                const text = this.memoryGuardWiredLimitCommand;
+            copyWiredLimitCommand(text = this.memoryGuardWiredLimitCommand) {
                 if (!text) return;
                 const onSuccess = () => {
                     this.wiredLimitCopied = true;
@@ -7575,6 +7627,256 @@
                     return latest && latest.status !== 'completed';
                 });
                 return !unfinished && this.hfModels.some(matches);
+            },
+
+            // =================================================================
+            // First-run banner
+            // =================================================================
+
+            get hasUserModels() {
+                return this.models.some(m => !m.virtual && !m.is_helper);
+            },
+
+            get onboardingTask() {
+                return this.hfTasks.find(t => t.status === 'pending' || t.status === 'downloading') || null;
+            },
+
+            get onboardingState() {
+                if (!this.onboardingStartedEmpty) return null;
+                if (this.onboardingTask) return 'downloading';
+                if (this.hasUserModels) return this.onboardingReadyDismissed ? null : 'ready';
+                return this.onboardingDismissed ? null : 'first';
+            },
+
+            get onboardingReadyName() {
+                const model = this.models.find(m => !m.virtual && !m.is_helper);
+                return model ? (model.display_name || model.id) : '';
+            },
+
+            // =================================================================
+            // Recommended models (hardware-aware oQ picks)
+            // =================================================================
+
+            async loadRecommendations(force = false) {
+                if (this.recommendationsLoading || (this.recommendations && !force)) return;
+                this.recommendationsLoading = true;
+                this.recommendationsError = '';
+                try {
+                    const response = await fetch('/admin/api/hf/recommendations');
+                    if (response.ok) {
+                        this.recommendations = await response.json();
+                    } else if (response.status === 401) {
+                        window.location.href = '/admin';
+                    } else {
+                        const data = await response.json().catch(() => ({}));
+                        this.recommendationsError = data.detail || window.t('models.recommend.error');
+                    }
+                } catch (err) {
+                    this.recommendationsError = window.t('models.recommend.error');
+                    console.error('Failed to load recommendations:', err);
+                } finally {
+                    this.recommendationsLoading = false;
+                }
+            },
+
+            recGB(bytes) {
+                const gb = (bytes || 0) / 1024 ** 3;
+                return (gb >= 100 ? Math.round(gb) : gb.toFixed(1)) + ' GB';
+            },
+
+            recContext(tokens) {
+                if (tokens >= 1024 * 1024) return Math.round(tokens / (1024 * 1024)) + 'M';
+                return Math.round(tokens / 1024) + 'K';
+            },
+
+            recParams(count) {
+                const b = count / 1e9;
+                return (b >= 10 ? Math.round(b) : b.toFixed(1)) + 'B';
+            },
+
+            recArch(item) {
+                if (!item.moe) {
+                    return window.t('models.recommend.arch.dense').replace('{total}', this.recParams(item.total_params));
+                }
+                return window.t('models.recommend.arch.moe')
+                    .replace('{total}', this.recParams(item.total_params))
+                    .replace('{active}', this.recParams(item.active_params));
+            },
+
+            recDownloadsText(item) {
+                return window.t('models.recommend.meta.downloads').replace('{count}', this.formatDownloads(item.downloads));
+            },
+
+            recDots(level) {
+                return [1, 2, 3, 4, 5].map(i => (i <= level ? 'full' : (i - 0.5 === level ? 'half' : 'empty')));
+            },
+
+            // Share of the budget a row's weights take. Unlock rows use the raised budget.
+            recMemoryShare(item) {
+                const scenarios = this.recommendations.memory.scenarios;
+                const usable = (item.kind ? scenarios.both : scenarios.now).usable_bytes;
+                return usable > 0 ? Math.min(100, Math.round(item.resident_bytes / usable * 100)) : 100;
+            },
+
+            // Roomy, getting full, tight.
+            recMemoryBarClass(item) {
+                const share = this.recMemoryShare(item);
+                if (share >= 85) return 'bg-red-400';
+                if (share >= 60) return 'bg-orange-300';
+                return 'bg-emerald-400';
+            },
+
+            recSpeedVs(item) {
+                const ratio = item.relative_speed;
+                const fmt = r => (r >= 10 ? r.toFixed(0) : r.toFixed(1));
+                if (ratio > 1.1) {
+                    return window.t('models.recommend.relative.faster')
+                        .replace('{ratio}', fmt(ratio)).replace('{name}', item.base_name);
+                }
+                if (ratio < 0.9) {
+                    return window.t('models.recommend.relative.slower')
+                        .replace('{ratio}', fmt(1 / ratio)).replace('{name}', item.base_name);
+                }
+                return window.t('models.recommend.relative.similar').replace('{name}', item.base_name);
+            },
+
+            recNote(group, item) {
+                if (group === 'bigger') {
+                    return window.t('models.recommend.note.bigger')
+                        .replace('{total}', this.recParams(item.total_params)).replace('{speed}', this.recSpeedVs(item));
+                }
+                if (group === 'precise') {
+                    return window.t('models.recommend.note.precise').replace('{speed}', this.recSpeedVs(item));
+                }
+                if (group === 'faster') {
+                    return window.t('models.recommend.note.faster').replace('{speed}', this.recSpeedVs(item));
+                }
+                if (item.kind === 'table_in_memory') {
+                    return window.t('models.recommend.note.table_in_memory').replace('{speed}', this.recSpeedVs(item));
+                }
+                const best = this.recommendations.sections.best;
+                const smartest = Math.max(...best.map(b => b.smarts), -Infinity);
+                return window.t(item.smarts > smartest
+                    ? 'models.recommend.note.smarter_than_best'
+                    : 'models.recommend.note.larger_build');
+            },
+
+            recBiggerEmptyText() {
+                const best = this.recommendations.sections.best;
+                const smartest = Math.max(...best.map(b => b.smarts), -Infinity);
+                const names = this.recommendations.sections.unlock
+                    .filter(u => u.kind === 'fits' && u.smarts > smartest && !best.some(b => b.name === u.name))
+                    .map(u => `${u.name} oQ${u.level}e`);
+                if (!names.length) return window.t('models.recommend.bigger.empty');
+                return window.t('models.recommend.bigger.empty_unlock').replace('{models}', names.join(', '));
+            },
+
+            recTask(repoId) {
+                const wanted = repoId.toLowerCase();
+                return this.hfTasks.findLast(t => t.repo_id?.toLowerCase() === wanted);
+            },
+
+            recState(repoId) {
+                const task = this.recTask(repoId);
+                if (task && (task.status === 'pending' || task.status === 'downloading')) return 'downloading';
+                return this.isModelDownloaded(repoId) ? 'downloaded' : 'idle';
+            },
+
+            recDiskShort(item) {
+                const free = this.recommendations?.disk?.free_bytes || 0;
+                return free > 0 && item.download_bytes > free;
+            },
+
+            recChipLine() {
+                const device = this.recommendations.device;
+                if (!device.gpu_cores) return device.chip;
+                return device.chip + ' · ' + window.t('models.recommend.gpu_cores').replace('{cores}', device.gpu_cores);
+            },
+
+            recMemoryLine() {
+                return window.t('models.recommend.memory_line')
+                    .replace('{memory}', this.recGB(this.recommendations.memory.total_bytes))
+                    .replace('{bandwidth}', this.recommendations.device.bandwidth_gbps);
+            },
+
+            recGpuLimitText() {
+                const memory = this.recommendations.memory;
+                const key = memory.wired_limit_set ? 'models.recommend.chip.gpu_limit_set' : 'models.recommend.chip.gpu_limit_default';
+                return window.t(key).replace('{size}', this.recGB(memory.scenarios.now.metal_cap_bytes));
+            },
+
+            // Total RAM split into what models get and what holds them back.
+            recMemorySegments() {
+                const memory = this.recommendations.memory;
+                const now = memory.scenarios.now;
+                return [
+                    { key: 'usable', bytes: now.usable_bytes, cls: 'bg-emerald-500', label: 'models.recommend.bar.usable' },
+                    { key: 'headroom', bytes: now.ceiling_bytes - now.usable_bytes, cls: 'bg-emerald-500/30', label: 'models.recommend.bar.headroom' },
+                    { key: 'gpu', bytes: memory.static_ceiling_bytes - now.ceiling_bytes, cls: 'bg-amber-500/40', label: 'models.recommend.bar.gpu_limit' },
+                    // A custom memory guard ceiling below what the tier reserve allows.
+                    { key: 'custom', bytes: memory.total_bytes - memory.reserve_bytes - memory.static_ceiling_bytes, cls: 'bg-neutral-200', label: 'models.recommend.bar.custom_limit' },
+                    { key: 'reserve', bytes: memory.reserve_bytes, cls: 'bg-neutral-300', label: 'models.recommend.bar.reserve' },
+                ]
+                    .filter(segment => segment.bytes > 64 * 1024 ** 2)
+                    .map(segment => ({ ...segment, percent: segment.bytes / memory.total_bytes * 100 }));
+            },
+
+            recUnlockOpen() {
+                if (this.recommendationsUnlockOpen !== null) return this.recommendationsUnlockOpen;
+                return (this.recommendations?.memory?.total_bytes || 0) > 16 * 1024 ** 3;
+            },
+
+            recUnlockGain(key) {
+                const scenarios = this.recommendations.memory.scenarios;
+                const gain = scenarios[key].usable_bytes - scenarios.now.usable_bytes;
+                return gain > 256 * 1024 ** 2 ? gain : 0;
+            },
+
+            recAggressiveReserve() {
+                return this.recommendations.memory.aggressive_reserve_bytes;
+            },
+
+            recMetalPercent() {
+                const memory = this.recommendations.memory;
+                return Math.round(memory.scenarios.now.metal_cap_bytes / memory.total_bytes * 100);
+            },
+
+            recWiredCommand() {
+                const memory = this.recommendations.memory;
+                const mb = memory.suggested_wired_limit_mb;
+                if (!memory.guard_enabled || mb * 1024 ** 2 <= memory.scenarios.now.metal_cap_bytes) return '';
+                return `sudo sysctl iogpu.wired_limit_mb=${mb}`;
+            },
+
+            recUnlockSummary() {
+                const memory = this.recommendations.memory;
+                const both = memory.scenarios.both;
+                return window.t('models.recommend.unlock.summary')
+                    .replace('{usable}', this.recGB(both.usable_bytes))
+                    .replace('{now}', this.recGB(memory.scenarios.now.usable_bytes))
+                    .replace('{free}', this.recGB(memory.total_bytes - both.ceiling_bytes));
+            },
+
+            async recSetAggressive() {
+                this.recommendationsApplying = true;
+                try {
+                    const response = await fetch('/admin/api/global-settings', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ memory_guard_tier: 'aggressive' }),
+                    });
+                    if (response.ok) {
+                        this.globalSettings.memory.memory_guard_tier = 'aggressive';
+                        await this.loadRecommendations(true);
+                    } else {
+                        const data = await response.json().catch(() => ({}));
+                        this.hfError = data.detail || window.t('models.recommend.error');
+                    }
+                } catch (err) {
+                    console.error('Failed to switch the memory guard tier:', err);
+                } finally {
+                    this.recommendationsApplying = false;
+                }
             },
 
             getMemoryFitStatus(sizeBytes) {

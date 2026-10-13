@@ -9250,12 +9250,6 @@ class Scheduler:
         prompt_tokens = list(request.prompt_token_ids or [])
         if _output_tokens_cacheable(request):
             prompt_tokens += list(getattr(request, "output_token_ids", None) or [])
-        boundary_len = (len(prompt_tokens) // block_size) * block_size
-        if boundary_len <= 0:
-            return None
-
-        token_sequence = prompt_tokens[:boundary_len]
-
         boundary_override = self._get_boundary_store_override(request_id, prompt_tokens)
         if boundary_override is not None:
             (
@@ -9328,6 +9322,11 @@ class Scheduler:
         if self._detect_boundary_snapshot_need():
             return None
 
+        boundary_len = (len(prompt_tokens) // block_size) * block_size
+        if boundary_len <= 0:
+            return None
+
+        token_sequence = prompt_tokens[:boundary_len]
         live_payload = self._extract_live_request_cache_for_store(
             request_id,
             uid,
@@ -9585,7 +9584,8 @@ class Scheduler:
             # Filter before ranking so an ineligible larger store cannot
             # hide a smaller one whose prefix can actually be reused.
             restorable = (common // block) * block
-            if restorable == len(prompt):
+            exact_hit = restorable == len(prompt)
+            if exact_hit:
                 # Match exact-hit generation kickoff in prefix preparation:
                 # GDN sidecars drop the final block; other stateful caches
                 # cannot trim to N-1 and require a full prefill.
@@ -9593,7 +9593,18 @@ class Scheduler:
                     restorable = max(0, restorable - block)
                 elif self._detect_boundary_snapshot_need():
                     restorable = 0
-            if restorable < block:
+            # A stateful store's tail-terminal block matches below one block, so
+            # a prompt the store fully covers is restorable from it.
+            tail_reusable = (
+                not exact_hit
+                and common > 0
+                and restorable < common
+                and common == len(info.tokens)
+                and self._detect_boundary_snapshot_need()
+            )
+            if tail_reusable:
+                restorable = common
+            if restorable < block and not tail_reusable:
                 continue
             if (
                 len(info.tokens)

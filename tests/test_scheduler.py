@@ -1101,6 +1101,69 @@ class TestSchedulerAddRequest:
         assert (request.request_id in scheduler._cache_freshness_waits) is expected
         future.result.assert_not_called()
 
+    def test_admission_freshness_gate_waits_for_sub_block_tail_on_stateful_model(
+        self, mock_model, mock_tokenizer
+    ):
+        """A stateful model's tail-terminal block makes a sub-block prompt reusable.
+
+        Below one block there is no grid match, so without the tail path the
+        wait never fires and the repeat request looks up before the store's
+        tail is registered, re-prefilling from scratch (the <block_size cliff).
+        """
+        scheduler = Scheduler(model=mock_model, tokenizer=mock_tokenizer)
+        scheduler.block_aware_cache = MagicMock()
+        scheduler.config.paged_cache_block_size = 2048
+        scheduler._boundary_snapshot_required = True
+        prompt = list(range(786))
+
+        future = MagicMock()
+        future.done.return_value = False
+        scheduler._inflight_store_futures["req-prev"] = future
+        scheduler._inflight_store_info["req-prev"] = (
+            scheduler_module._InflightStoreInfo(tokens=list(range(781)))
+        )
+
+        request = Request(
+            request_id="req-next",
+            prompt=prompt,
+            sampling_params=SamplingParams(max_tokens=16),
+        )
+
+        scheduler.add_request(request)
+
+        assert scheduler._should_defer_for_cache_freshness(request) is True
+        assert request.request_id in scheduler._cache_freshness_waits
+        future.result.assert_not_called()
+
+    def test_admission_freshness_gate_skips_tail_not_covering_the_prompt(
+        self, mock_model, mock_tokenizer
+    ):
+        """A store longer than the prompt cannot serve it from a tail block."""
+        scheduler = Scheduler(model=mock_model, tokenizer=mock_tokenizer)
+        scheduler.block_aware_cache = MagicMock()
+        scheduler.config.paged_cache_block_size = 2048
+        scheduler._boundary_snapshot_required = True
+        prompt = list(range(1000))
+
+        future = MagicMock()
+        future.done.return_value = False
+        scheduler._inflight_store_futures["req-prev"] = future
+        scheduler._inflight_store_info["req-prev"] = (
+            scheduler_module._InflightStoreInfo(tokens=list(range(3149)))
+        )
+
+        request = Request(
+            request_id="req-next",
+            prompt=prompt,
+            sampling_params=SamplingParams(max_tokens=16),
+        )
+
+        scheduler.add_request(request)
+
+        assert scheduler._should_defer_for_cache_freshness(request) is False
+        assert request.request_id not in scheduler._cache_freshness_waits
+        future.result.assert_not_called()
+
     @pytest.mark.parametrize(
         ("prompt_len", "overlap", "store_len", "expected"),
         [
