@@ -5600,6 +5600,91 @@ def test_verify_qmm_routes_batched_rows_through_mma_kernel(
     assert mx.abs(out - expected).max().item() <= tolerance
 
 
+@pytest.mark.parametrize("bits", [4, 5, 8])
+@pytest.mark.parametrize("batch,length", [(1, 8), (2, 6), (1, 16), (2, 8), (1, 24)])
+def test_mma_kernel_8bit_matches_quantized_matmul(batch, length, bits):
+    """The mma tile kernel covers 8-bit weights at verify rows 7..24."""
+    from omlx.patches import qwen35_verify_qmm as vq
+
+    mx.random.seed(11)
+    layer = nn.QuantizedLinear(512, 288, bits=bits, group_size=64)
+    weight = (mx.random.normal((288, 512)) * 0.02).astype(mx.bfloat16)
+    layer.weight, layer.scales, layer.biases = mx.quantize(
+        weight, group_size=64, bits=bits
+    )
+    x = (mx.random.normal((batch, length, 512)) * 0.5).astype(mx.bfloat16)
+    expected = mx.quantized_matmul(
+        x,
+        layer.weight,
+        layer.scales,
+        layer.biases,
+        transpose=True,
+        group_size=64,
+        bits=bits,
+    ).reshape(batch * length, 288).astype(mx.float32)
+    y = vq.vk_qmm_mma(
+        x.reshape(batch * length, 512),
+        layer.weight,
+        layer.scales,
+        layer.biases,
+        group_size=64,
+        bits=bits,
+    )
+    mx.eval(y, expected)
+    assert y.shape == (batch * length, 288)
+    tolerance = 2.0 * mx.abs(expected).max().item() / 256 + 1e-2
+    assert mx.abs(y.astype(mx.float32) - expected).max().item() <= tolerance
+
+
+@pytest.mark.parametrize("bits", [4, 8])
+@pytest.mark.parametrize("batch,length", [(1, 4), (1, 8), (2, 8), (1, 16)])
+def test_verify_fused_qmm_routes_concatenated_projections(monkeypatch, batch, length, bits):
+    """The fused in-proj route: armed multi-row shapes take the kernels,
+    decode, disarmed calls and odd layouts keep the stock qmm."""
+    from omlx.patches import qwen35_verify_qmm as vq
+
+    vq.apply_verify_qmm_patch()
+    monkeypatch.setattr(vq, "_MIN_MMA_ROUTE_N", 128)
+    monkeypatch.setattr(vq, "_MIN_ROUTE_N", 128)
+    monkeypatch.setattr(vq, "_MIN_SG8_ROUTE_N", 128)
+    mx.random.seed(3)
+    weight = (mx.random.normal((240, 512)) * 0.02).astype(mx.bfloat16)
+    w_q, scales, biases = mx.quantize(weight, group_size=64, bits=bits)
+    x = (mx.random.normal((batch, length, 512)) * 0.5).astype(mx.bfloat16)
+    expected = mx.quantized_matmul(
+        x, w_q, scales, biases, transpose=True, group_size=64, bits=bits
+    ).astype(mx.float32)
+    kwargs = {"bits": bits, "group_size": 64}
+    rows = batch * length
+
+    # Disarmed: stock qmm, helper declines.
+    assert vq.verify_fused_qmm(x, w_q, scales, biases, **kwargs) is None
+
+    monkeypatch.setattr(vq, "_is_armed", lambda: True)
+    routed = vq.verify_fused_qmm(x, w_q, scales, biases, **kwargs)
+    if rows < 3:
+        assert routed is None
+    else:
+        mx.eval(routed, expected)
+        assert routed.shape == (batch, length, 240)
+        tolerance = 2.0 * mx.abs(expected).max().item() / 256 + 1e-2
+        assert mx.abs(routed.astype(mx.float32) - expected).max().item() <= tolerance
+
+    # Row-exact mode keeps the fused projection on the stock path.
+    vq.set_verify_qmm_armed(True, row_exact=True)
+    try:
+        assert vq.verify_fused_qmm(x, w_q, scales, biases, **kwargs) is None
+    finally:
+        vq.set_verify_qmm_armed(False)
+
+    # A layout the kernels do not encode (K not a multiple of the word
+    # packing) must fail closed instead of reading garbage.
+    bad = (mx.random.normal((248, 320)) * 0.02).astype(mx.bfloat16)
+    bw, bs, bb = mx.quantize(bad, group_size=64, bits=bits)
+    x_bad = (mx.random.normal((batch, length, 384)) * 0.5).astype(mx.bfloat16)
+    assert vq.verify_fused_qmm(x_bad, bw, bs, bb, **kwargs) is None
+
+
 @pytest.mark.parametrize("dtype", [mx.bfloat16, mx.float16])
 @pytest.mark.parametrize("bits", [4, 5])
 @pytest.mark.parametrize("rows", [4, 8])
