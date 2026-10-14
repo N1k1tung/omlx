@@ -65,6 +65,10 @@ class SamplingParams:
     # default (mlx-lm uses 20). Loop units longer than the window never
     # overlap their own penalty context.
     repetition_context_size: Optional[int] = None
+    # Ban tokens that would repeat an n-gram of this size (0 = off), looking
+    # only at the last ngram_window tokens when that is set (0 = all tokens).
+    no_repeat_ngram_size: int = 0
+    ngram_window: int = 0
     presence_penalty: float = 0.0
     frequency_penalty: float = 0.0
     stop: Optional[List[str]] = None

@@ -102,6 +102,7 @@ from .utils.metal_sync import (
     unreleased_graphics_bytes,
 )
 from .utils.proc_memory import get_graphics_footprint, get_phys_footprint
+from .utils.sampling import make_no_repeat_ngram_processor
 from .utils.sampling import make_sampler as omlx_make_sampler
 from .utils.sampling import make_shared_sampler as omlx_make_shared_sampler
 from .utils.tokenizer import create_streaming_detokenizer
@@ -7821,6 +7822,13 @@ class Scheduler:
                 else {}
             ),
         )
+        if sampling_params.no_repeat_ngram_size:
+            logits_processors.append(
+                make_no_repeat_ngram_processor(
+                    sampling_params.no_repeat_ngram_size,
+                    sampling_params.ngram_window,
+                )
+            )
 
         suppress_processor = _make_suppress_logits_processor(
             self._model_suppress_tokens

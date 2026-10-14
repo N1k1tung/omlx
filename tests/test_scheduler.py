@@ -2800,6 +2800,62 @@ class TestSchedulerSuppressTokens:
         assert int(round_token.item()) == 2
 
 
+class TestSchedulerNoRepeatNgram:
+    @staticmethod
+    def _decode(model, tokenizer, rows):
+        scheduler = Scheduler(model=model, tokenizer=tokenizer)
+        requests = [
+            Request(request_id=f"r{i}", prompt=list(prompt), sampling_params=params)
+            for i, (prompt, params) in enumerate(rows)
+        ]
+        for request in requests:
+            scheduler.add_request(request)
+        for _ in range(200):
+            scheduler.step()
+            if not any(r.request_id in scheduler.requests for r in requests):
+                break
+        scheduler.shutdown()
+        return [list(r.output_token_ids) for r in requests]
+
+    def test_batched_greedy_decode_bans_only_its_own_row(self, mock_tokenizer):
+        from mlx_lm.models.llama import Model, ModelArgs
+
+        mx.random.seed(0)
+        model = Model(
+            ModelArgs(
+                model_type="llama",
+                hidden_size=32,
+                num_hidden_layers=2,
+                intermediate_size=64,
+                num_attention_heads=2,
+                num_key_value_heads=1,
+                rms_norm_eps=1e-5,
+                vocab_size=64,
+                tie_word_embeddings=True,
+            )
+        )
+        greedy = SamplingParams(max_tokens=40, temperature=0)
+        banned = SamplingParams(max_tokens=40, temperature=0, no_repeat_ngram_size=3)
+        short, long = [5, 9, 12], [7, 3, 30, 22, 14, 9, 41, 8, 17]
+
+        def repeated_trigrams(tokens):
+            trigrams = [tuple(tokens[i : i + 3]) for i in range(len(tokens) - 2)]
+            return len(trigrams) - len(set(trigrams))
+
+        loop, neighbour = self._decode(
+            model, mock_tokenizer, [(short, greedy), (long, greedy)]
+        )
+        fixed, same_neighbour = self._decode(
+            model, mock_tokenizer, [(short, banned), (long, greedy)]
+        )
+
+        # The tiny greedy model loops; with the ban, prompt plus output never
+        # repeats a trigram, and the other row of the batch is untouched.
+        assert repeated_trigrams(short + loop) > 10
+        assert len(fixed) > 10 and repeated_trigrams(short + fixed) == 0
+        assert same_neighbour == neighbour
+
+
 class TestSchedulerXtcSpecialTokens:
     """Tests for _get_xtc_special_tokens()."""
 

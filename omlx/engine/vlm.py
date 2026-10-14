@@ -4830,6 +4830,8 @@ class VLMBatchedEngine(BaseEngine):
             xtc_threshold=kwargs.get("xtc_threshold", 0.1),
             repetition_penalty=repetition_penalty,
             repetition_context_size=kwargs.get("repetition_context_size"),
+            no_repeat_ngram_size=kwargs.get("no_repeat_ngram_size", 0),
+            ngram_window=kwargs.get("ngram_window", 0),
             presence_penalty=presence_penalty,
             frequency_penalty=kwargs.get("frequency_penalty", 0.0),
             stop=stop or [],
@@ -4946,6 +4948,8 @@ class VLMBatchedEngine(BaseEngine):
             xtc_threshold=kwargs.get("xtc_threshold", 0.1),
             repetition_penalty=repetition_penalty,
             repetition_context_size=kwargs.get("repetition_context_size"),
+            no_repeat_ngram_size=kwargs.get("no_repeat_ngram_size", 0),
+            ngram_window=kwargs.get("ngram_window", 0),
             presence_penalty=presence_penalty,
             frequency_penalty=kwargs.get("frequency_penalty", 0.0),
             stop=stop or [],
@@ -5572,6 +5576,11 @@ class VLMBatchedEngine(BaseEngine):
             raise InvalidRequestError(
                 "SpecPrefill is not supported with diffusion models.",
                 field="specprefill",
+            )
+        if kwargs.get("no_repeat_ngram_size"):
+            raise InvalidRequestError(
+                "no_repeat_ngram_size is not supported with diffusion models.",
+                field="no_repeat_ngram_size",
             )
 
     def _diffusion_apply_chat_template(
