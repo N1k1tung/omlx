@@ -349,9 +349,11 @@ def _verify_qmm_may_route(g5_lang: Any, attn: Any, inputs: mx.array) -> bool:
 
     The reference body makes multi-row ``QuantizedLinear`` calls only for a
     layer whose projections do not share one quantization (``_fused_in_proj``
-    then runs them one by one, e.g. GLM-5.3's layer 40 with a 5-bit v_proj),
-    while the fused step's grouped matmuls are never routed. Those blocks
-    keep the reference body, so the verify values do not depend on the path.
+    then runs them one by one, e.g. GLM-5.3's layer 40 with a 5-bit v_proj).
+    Fused and reference bodies route the same per-row kernels over the same
+    weights (``verify_fused_qmm`` covers the fused/grouped in-proj), so the
+    verify values do not depend on the path; mixed blocks still keep the
+    reference body because the fused KDA step declines there.
     """
     if getattr(attn, "_fused_ready", False):
         return False

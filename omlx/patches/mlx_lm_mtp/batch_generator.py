@@ -34,17 +34,20 @@ from . import prompt_priming as _prompt_priming
 logger = logging.getLogger(__name__)
 
 
-def _set_verify_qmm_armed(flag: bool, *, row_exact: bool = False) -> None:
+def _set_verify_qmm_armed(
+    flag: bool, *, row_exact: bool = False, model_type: str | None = None
+) -> None:
     """Arm the verify-shape qmm routing for the duration of an MTP forward.
 
     ``row_exact`` arms the row-exact mode instead (see
     ``_row_exact_verify``). Import is deferred and failure-tolerant: the
     kernel module is optional and its absence must not affect the MTP path.
+    ``model_type`` scopes the extended GLM verify routes to that target.
     """
     try:
         from ..qwen35_verify_qmm import set_verify_qmm_armed
 
-        set_verify_qmm_armed(flag, row_exact=row_exact)
+        set_verify_qmm_armed(flag, row_exact=row_exact, model_type=model_type)
     except Exception:
         pass
 
@@ -2164,6 +2167,7 @@ def _call_backbone_impl(
     _set_verify_qmm_armed(
         not dspark_verify,
         row_exact=inputs.shape[0] == 1 and _row_exact_verify(model),
+        model_type=getattr(model, "model_type", None),
     )
     _set_dspark_target_verify(model, dspark_verify)
     try:

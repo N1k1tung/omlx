@@ -44,16 +44,6 @@ thread-local flag (set by
 ``omlx.patches.mlx_lm_mtp.batch_generator._call_backbone``) so nothing else
 in the process sees the patched ``nn.QuantizedLinear``.
 
-Numerics: fp32 accumulation in lane-strided K order differs from stock qmm
-at bf16 tail-ULP level. Greedy outputs can therefore occasionally diverge
-from the unrouted path (the token is still trunk-verified — the divergence
-class is the same as any kernel change).
-
-Supported: 4-bit and 8-bit affine, group_size in {32, 64, 128}, bf16/fp16
-activations, M in 3..6, K % 64 == 0, N % 4 == 0. The mma path takes 4-bit
-and 5-bit affine, M in 7..24, K % 256 == 0, N % 16 == 0. Everything else falls back to
-stock.
-
 Blocks of four to eight rows (DFlash and Lightning MTP verifies) take
 ``sg8`` instead: bf16 rows, 4- or 5-bit weights, N >= 1024. Each lane builds its simdgroup-matrix
 operands in registers from one packed word per 32 inputs (bf16 ``128 + q``,
@@ -62,15 +52,34 @@ exact), so no threadgroup dequant tile is needed; the group fold removes
 share one launch (``vk_group_sg8``, mixed bit widths allowed) and the dense
 MLP's gate/up/SiLU is one launch (``vk_swiglu_sg8``).
 
+Projections that bypass ``nn.QuantizedLinear`` (GLM's fused KDA input
+projection and its grouped variant call ``fused_quantized_matmul`` directly)
+take ``verify_fused_qmm``: the same routes against the concatenated weight,
+so the largest width-insensitive verify matmul stops paying the stock qmm
+per-row penalty at every draft width.
+
 The armed verifier also fuses each residual add with the next RMSNorm
 (bit-exact to the separate ops) and submits the partial graph every few
 layers, so the GPU starts while the host still builds the verify.
+
+Numerics: fused projections and narrow mma calls keep stock FP32 affine
+weights and reduction order through the existing one-pass wide tile. The
+matrix tile is used only where stock qmm also rounds dequantized weights
+to the activation dtype. Other split-K/sg8 routes and matrix reductions
+can still differ from stock qmm at tail-ULP level.
+
+Supported: 4-bit and 8-bit affine, group_size in {32, 64, 128}, bf16/fp16
+activations, M in 3..6, K % 64 == 0, N % 4 == 0. The mma path takes 4- and
+5-bit affine for every family and 8-bit affine for glm5_next forwards,
+M in 7..24, K % 256 == 0, N % 16 == 0. Everything else falls back to stock.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 import threading
+from functools import cache
 
 logger = logging.getLogger(__name__)
 
@@ -94,16 +103,29 @@ _MIN_SG8_ROUTE_N = 1024
 _SG8_MIN_ROWS = 4
 
 
-def set_verify_qmm_armed(flag: bool, *, row_exact: bool = False) -> None:
+def set_verify_qmm_armed(
+    flag: bool, *, row_exact: bool = False, model_type: str | None = None
+) -> None:
     """Arm/disarm verify-qmm routing (MTP verify forwards only).
 
     ``row_exact`` arms the row-exact mode instead: every multi-row
     ``nn.QuantizedLinear`` call runs ``row_exact_qmv`` (one-row decode
     arithmetic per row) and the fast verify kernels below stay disarmed.
+
+    ``model_type`` is the target's existing model type. Only ``glm5_next``
+    and ``glm5_next_text`` forwards may take the 8-bit mma and exact wide
+    tiles, so every other family keeps the stock-qmm dispatch those routes
+    replaced.
     """
     _ROUTE_ARMED.value = bool(flag) and not row_exact
     _ROUTE_ARMED.row_exact = bool(flag) and bool(row_exact)
+    _ROUTE_ARMED.model_type = model_type if flag else None
     _ROUTE_ARMED.layers = 0
+
+
+def _glm5_next_armed() -> bool:
+    """Whether the armed forward belongs to the glm5_next family."""
+    return getattr(_ROUTE_ARMED, "model_type", None) in {"glm5_next", "glm5_next_text"}
 
 
 def _is_armed() -> bool:
@@ -437,6 +459,19 @@ def _build_mma_kernel(
                     uint32_t nib = (packed >> (ki * 4)) & 0xFu;
                     B_tile[sg_id][(dq_k * 8 + ki) * BN + dq_n] = T(float(nib) * s + b);
                 }"""
+    elif bits == 8:
+        # MLX 8-bit affine: four codes per uint32, so one 8-value k row
+        # reads the word at k_base / 4 and its successor.
+        unpack = """
+                uint32_t packed = w_q[n_global * K_by_4 + (k_base >> 2)];
+                uint32_t packed2 = w_q[n_global * K_by_4 + (k_base >> 2) + 1];
+                _Pragma("unroll")
+                for (int ki = 0; ki < 4; ++ki) {
+                    uint32_t va = (packed >> (ki * 8)) & 0xFFu;
+                    uint32_t vb = (packed2 >> (ki * 8)) & 0xFFu;
+                    B_tile[sg_id][(dq_k * 8 + ki) * BN + dq_n] = T(float(va) * s + b);
+                    B_tile[sg_id][(dq_k * 8 + ki + 4) * BN + dq_n] = T(float(vb) * s + b);
+                }"""
     else:
         # MLX 5-bit affine: eight values per five little-endian bytes.
         unpack = """
@@ -481,6 +516,7 @@ def _build_mma_kernel(
         constexpr int GS = {group_size};
         constexpr int K = {int(k_val)};
         constexpr int K_by_8 = K / 8;
+        constexpr int K_by_4 = K / 4;
         constexpr int K_by_gs = K / GS;
         constexpr int K_chunk = K / NSG;
 
@@ -922,7 +958,7 @@ def mma_eligible(M: int, K: int, N: int, bits: int, group_size: int, dtype) -> b
     import mlx.core as mx
 
     return (
-        int(bits) in (4, 5)
+        int(bits) in (4, 5, 8)
         and int(group_size) in (32, 64, 128)
         and dtype in (mx.bfloat16, mx.float16)
         # Above 24 rows stock qmm fills its 32-row tile and wins.
@@ -933,13 +969,77 @@ def mma_eligible(M: int, K: int, N: int, bits: int, group_size: int, dtype) -> b
     )
 
 
+@cache
+def _stock_qmv_wide_limit(K: int, N: int):
+    """First tiled-qmm row count; None when the exact wide kernel is unsupported."""
+    import mlx.core as mx
+
+    from .mlx_vlm_glm5_next_compat.decode_kernels import fused_decode_supported
+
+    if not fused_decode_supported():
+        return None
+    arch = str(mx.device_info()["architecture"])
+    size = 0 if max(K, N) <= 2048 else 1 if max(K, N) <= 4096 else 2
+    # Matches MLX 0.32.3 get_qmv_batch_limit; update with the MLX pin.
+    if arch.endswith("d"):
+        return (32, 18, 12)[size]
+    generation = int(re.match(r"applegpu_g(\d+)", arch)[1])
+    return ((33, 25, 13) if generation >= 17 else (13, 15, 13))[size]
+
+
+def _vk_qmm_wide(x2, w_q, scales, biases, *, bits: int, group_size: int):
+    """Keep stock FP32 dequantization and reductions while sharing a weight pass."""
+    import mlx.core as mx
+
+    from .mlx_vlm_glm5_next_compat.decode_kernels import (
+        _multi_qmv_kernel,
+        fused_decode_supported,
+    )
+
+    M, K = x2.shape
+    N = w_q.shape[0]
+    # The one-pass tile covers eight rows. Wider verifies keep native qmm
+    # until a tile with a bounded register footprint is profitable there.
+    if (
+        M > 8
+        or N % 8
+        or K in (64, 128)
+        or not fused_decode_supported()
+        or scales.dtype != x2.dtype
+        or biases.dtype != x2.dtype
+    ):
+        return mx.quantized_matmul(
+            x2, w_q, scales, biases, transpose=True, bits=bits, group_size=group_size
+        )
+    return _multi_qmv_kernel(1, M)(
+        inputs=[x2, w_q, scales, biases],
+        template=[
+            ("T", x2.dtype), ("K", K), ("BITS", bits), ("GS", group_size),
+            ("N0", N), ("N1", 0), ("N2", 0), ("N3", 0),
+        ],
+        grid=(64 * (N // 8), 1, 1),
+        threadgroup=(64, 1, 1),
+        output_shapes=[(M, N)],
+        output_dtypes=[x2.dtype],
+    )[0]
+
+
 def vk_qmm_mma(x2, w_q, scales, biases, *, group_size: int, bits: int = 4):
-    """(M, K) x (N, K)^T -> (M, N) for M in 7..24 through the mma tile kernel."""
+    """(M, K) x (N, K)^T for M in 7..24, preserving stock's weight precision."""
     import mlx.core as mx
 
     M = int(x2.shape[0])
     K = int(x2.shape[1])
     N = int(w_q.shape[0])
+    if _glm5_next_armed():
+        limit = _stock_qmv_wide_limit(K, N)
+        if limit is None or M < limit:
+            # Stock's vector path keeps affine weights in FP32. Rounding them
+            # into the MMA's T tile changes the effective weights at these
+            # rows. Other families keep the matrix tile at every row.
+            return _vk_qmm_wide(
+                x2, w_q, scales, biases, bits=bits, group_size=group_size
+            )
     row_tiles = (M + 7) // 8
     bm = 8 * row_tiles
     xm, M0 = _pad_rows(mx, x2, bm)
@@ -1011,6 +1111,72 @@ def vk_qmm(x2, w_q, scales, biases, *, bits: int, group_size: int):
         output_dtypes=[x2.dtype],
     )
     return y[:M0, :] if M0 < m else y
+
+
+def verify_fused_qmm(
+    x,
+    w_q,
+    scales,
+    biases,
+    *,
+    bits: int,
+    group_size: int,
+):
+    """Armed verify route for a projection that bypasses ``nn.QuantizedLinear``.
+
+    GLM's fused KDA input projection (and its grouped variant) concatenate
+    q|k|v|f_a|g_a|b into one affine weight and call ``fused_quantized_matmul``
+    directly, so the patched ``__call__`` never sees them and every verify
+    width paid the stock qmm per-row penalty. This applies the same
+    ``_verify_route`` selection to the raw (weight, scales, biases) triple.
+
+    ``x`` is [B, L, K]; returns [B, L, N], or None unless the verify flag is
+    armed, rows = B * L is 3..24, and the layout takes a kernel. The caller
+    keeps the stock qmm then.
+    """
+    import mlx.core as mx
+
+    if not _is_armed() or is_row_exact_armed() or x.ndim != 3:
+        return None
+    batch, length, K = (int(v) for v in x.shape)
+    rows = batch * length
+    if rows < 3:
+        # Decode (and depth-1 verifies) keep the stock path bit-identical,
+        # like the patched QuantizedLinear route.
+        return None
+    N = int(scales.shape[0])
+    if (
+        x.dtype not in (mx.bfloat16, mx.float16)
+        or int(w_q.shape[0]) != N
+        or int(w_q.shape[1]) * 32 != K * int(bits)
+        or int(scales.shape[1]) * int(group_size) != K
+        or scales.dtype != x.dtype
+        or biases.dtype != x.dtype
+    ):
+        return None
+    route = _verify_route(rows, K, N, int(bits), int(group_size), x.dtype)
+    if route is None:
+        return None
+    x2 = x.reshape(rows, K)
+    limit = _stock_qmv_wide_limit(K, N)
+    if limit is None:
+        return None
+    if rows < limit:
+        return _vk_qmm_wide(
+            x2, w_q, scales, biases, bits=int(bits), group_size=int(group_size)
+        ).reshape(batch, length, N)
+    if route == "sg8":
+        y = vk_qmm_sg8(
+            x2, w_q, scales, biases, group_size=int(group_size), bits=int(bits),
+            sums=group_sums_for(x),
+        )
+    elif route == "mma":
+        y = vk_qmm_mma(
+            x2, w_q, scales, biases, group_size=int(group_size), bits=int(bits)
+        )
+    else:
+        y = vk_qmm(x2, w_q, scales, biases, bits=int(bits), group_size=int(group_size))
+    return y.reshape(batch, length, N)
 
 
 def vk_eligible(M: int, K: int, N: int, bits: int, group_size: int, dtype) -> bool:
@@ -1490,7 +1656,11 @@ def _verify_route(rows: int, K: int, N: int, bits: int, group_size: int, dtype):
     for the stock qmm."""
     if sg8_eligible(rows, K, N, bits, group_size, dtype):
         return "sg8"
-    if mma_eligible(rows, K, N, bits, group_size, dtype):
+    # The 8-bit mma tile is a glm5_next-family route; other families keep
+    # the stock qmm that handled 8-bit weights before it existed.
+    if (bits != 8 or _glm5_next_armed()) and mma_eligible(
+        rows, K, N, bits, group_size, dtype
+    ):
         return "mma"
     if rows <= 6 and vk_eligible(rows, K, N, bits, group_size, dtype):
         return "vk"
