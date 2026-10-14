@@ -24,7 +24,7 @@ _DEEPSEEK_MXFP4_LARGE_BLOCK_VARIANT = 2
 _DEEPSEEK_AFFINE_LARGE_BLOCK_MIN_ROUTES = 8192
 # Affine 2/3-bit g64 crossovers measured on M1 Ultra. Other formats keep
 # their existing 64-route sorting threshold.
-_SORT_MIN_ROUTES = 32
+_SORT_MIN_ROUTES = 16
 _AFFINE_NATIVE_MIN_ROUTES = 1024
 # Tuned on M3 Ultra. Set this to 8192 to restore the previous crossover on
 # other pre-NAX chips; M5 prefill uses the NAX fallback below.
@@ -46,7 +46,7 @@ def _sort_threshold(*projections) -> int:
     if all(
         isinstance(p, QuantizedSwitchLinear)
         and p.mode == "affine"
-        and p.bits in (2, 3)
+        and p.bits in (2, 3, 4)
         and p.group_size == 64
         for p in projections
     ):
