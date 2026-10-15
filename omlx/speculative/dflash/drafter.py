@@ -120,8 +120,7 @@ class DFlashDrafter:
         self.block_size = int(block_size)
         # Lightning MTP reads this as the maximum draft depth.
         self.depth = self.block_size - 1
-        # Adaptive: Lightning MTP's depth controllers choose how many drafts
-        # of each block to verify. Otherwise the whole block is verified.
+        # Adaptive: Lightning MTP's depth controllers choose the draft depth.
         self.adaptive = bool(adaptive)
         attn = model.layers[0].self_attn
         # Laguna drafts with causal block attention; DFlash v1/v2 blocks
@@ -390,17 +389,29 @@ class DFlashDrafter:
     def draft(self, jobs: Sequence[tuple]) -> None:
         """Draft the next block for every job after its cycle committed.
 
+        The block holds exactly the row's currently selected depth in
+        proposals: a noncausal block's acceptance describes only the width it
+        was drafted at, so the verify must not clip a wider block.
         Each job is ``(gen_batch, state, captured, committed, prev_buf)`` in the
         Lightning MTP draft-job layout: ``captured`` holds the per-layer hidden
         rows ``[(1, n, H), ...]`` of the positions just committed and
         ``committed[-1]`` is the newest committed token, which anchors the
         block. Writes ``state.drafts`` and clears the head-only logprob lists.
         """
+        # The cohort policy already gives every job the same selected depth.
+        state = jobs[0][1]
+        depth = state.controller.cur if state.controller is not None else state.depth
         rows = []
         for gen_batch, state, captured, committed, _prev_buf in jobs:
             row = self._row(state.uid)
             if captured:
                 self._queue(row, _concat_captured(captured))
+            if depth == 0:
+                self._bound_pending(row)
+                state.drafts = mx.array([], dtype=mx.uint32)
+                state.draft_depth = 0
+                state.draft_lps = state.draft_accept_lps = []
+                continue
             if not row.pending:
                 raise RuntimeError(
                     f"DFlash drafter has no context for uid={state.uid!r}"
@@ -416,17 +427,20 @@ class DFlashDrafter:
             if gen_batch is not None and not bg._is_greedy(gen_batch):
                 sampler = bg._resolve_draft_sampler(gen_batch, state)
             rows.append((state, row, context, anchor, sampler))
+        if not rows:
+            return
         # The drafter's projections see rows x block inputs like a verify
         # forward, so the same small-M kernels apply.
         started = time.perf_counter()
         target = getattr(jobs[0][0], "model", None) if jobs else None
         set_verify_qmm_armed(True, model_type=getattr(target, "model_type", None))
         try:
-            proposals = self._draft_batched(rows)
+            proposals = self._draft_batched(rows, block_size=depth + 1)
         finally:
             set_verify_qmm_armed(False)
         for (state, *_), (tokens, accept_lps) in zip(rows, proposals):
             state.drafts = tokens.reshape(-1).astype(mx.uint32)
+            state.draft_depth = depth
             mx.async_eval(state.drafts)
             state.draft_lps = []
             state.draft_accept_lps = accept_lps
@@ -446,7 +460,8 @@ class DFlashDrafter:
         drafts while the host settles the cycle; ``adopt_predraft`` then keeps
         the block if the host commits the same count.
         """
-        if not captured:
+        depth = state.controller.cur if state.controller is not None else state.depth
+        if not captured or depth == 0:
             return False
         row = self._row(state.uid)
         if row.restored is not None:
@@ -467,6 +482,7 @@ class DFlashDrafter:
                 [(state, row, context, anchor.reshape(1).astype(mx.int32), sampler)],
                 counts=[count.reshape(1) + unfed],
                 commit=False,
+                block_size=depth + 1,
             )
         finally:
             set_verify_qmm_armed(False)
@@ -491,6 +507,7 @@ class DFlashDrafter:
         self._remember(row, pre.contexts[0][:, : pre.unfed[0] + int(count)])
         tokens, accept_lps = pre.proposals[0]
         state.drafts = tokens.reshape(-1).astype(mx.uint32)
+        state.draft_depth = int(state.drafts.shape[0])
         state.draft_lps = []
         state.draft_accept_lps = accept_lps
 
@@ -556,19 +573,22 @@ class DFlashDrafter:
         self._cohort = _Cohort(uids=uids, keys=keys, values=values, pos=pos)
         return self._cohort
 
-    def _draft_batched(self, rows: Sequence[tuple], counts=None, commit=True):
+    def _draft_batched(
+        self, rows: Sequence[tuple], counts=None, commit=True, block_size=None
+    ):
         """One draft forward for every row; mirrors DFlashAttention rowwise math.
 
         ``counts`` optionally gives each row's committed context rows as a lazy
         ``(1,)`` array; the rest of its context is written but never attended.
         Without ``commit`` the new rings wait in ``self._predraft``.
+        ``block_size`` overrides the anchor-plus-proposal width of the block.
         """
         model = self.model
         uids = [state.uid for state, *_ in rows]
         slots = self.ring_slots
         capacity = self.capacity
         batch = len(rows)
-        block = self.block_size
+        block = self.block_size if block_size is None else block_size
         fc = model.encoder.fc if hasattr(model, "encoder") else model.fc
         dtype = fc.weight.dtype if hasattr(fc, "weight") else mx.bfloat16
         if hasattr(fc, "scales"):

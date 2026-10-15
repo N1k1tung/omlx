@@ -17,7 +17,7 @@ class BatchPolicy:
     Ordinary decode supplies its own baseline; depth-zero MTP is not a proxy.
     """
 
-    def __init__(self, uids, max_depth, *, fixed=False):
+    def __init__(self, uids, max_depth, *, fixed=False, acceptance_by_depth=False):
         self.uids = tuple(uids)
         self.max_depth = max(1, max_depth)
         self.cur = self.max_depth
@@ -29,6 +29,16 @@ class BatchPolicy:
         self.standard_warmup = 2
         self.costs = {}
         self.acceptance = [0.6] * self.max_depth
+        # Noncausal block widths have different proposal distributions, so
+        # each width keeps its own curve; unmeasured positions stay None and
+        # score from the pooled curve, which trains at every drafted width
+        # (width-only priors left unrun widths unscoreable and locked
+        # cohorts onto shallow depths).
+        self.acceptance_by_depth = (
+            {d: [None] * d for d in range(1, self.max_depth + 1)}
+            if acceptance_by_depth
+            else {}
+        )
         self.losing = 0
         self.clear_losing = 0
         self.cooldown = 128
@@ -75,6 +85,8 @@ class BatchPolicy:
                 self.costs.clear()
                 self.last_seen.clear()
                 self.acceptance = [0.6] * self.max_depth
+                for d in self.acceptance_by_depth:
+                    self.acceptance_by_depth[d] = [None] * d
                 self.cur = self.max_depth
                 self.losing = 0
 
@@ -85,18 +97,47 @@ class BatchPolicy:
         if not costs:
             return 0.0
         expected = reach = 1.0
-        for probability in self.acceptance[:depth]:
+        acceptance = self.acceptance_by_depth.get(depth, self.acceptance)
+        for position in range(min(depth, len(acceptance))):
+            probability = acceptance[position]
+            if probability is None:
+                # An unmeasured position reads the pooled estimate.
+                probability = self.acceptance[position]
             reach *= probability
             expected += reach
         return len(self.uids) * expected / median(costs)
 
-    def observe_mtp(self, depth, accepted, milliseconds, *, stable):
+    def _observe_acceptance(self, acceptance, counts, depth):
+        # Conditional-prefix reach EMA; an unmeasured position starts from
+        # the pooled estimate at the same position.
         for position in range(depth):
-            reached = sum(count >= position for count in accepted)
+            reached = sum(count >= position for count in counts)
             if not reached:
                 break
-            rate = sum(count > position for count in accepted) / reached
-            self.acceptance[position] += 0.08 * (rate - self.acceptance[position])
+            rate = sum(count > position for count in counts) / reached
+            if acceptance[position] is None:
+                acceptance[position] = self.acceptance[position]
+            acceptance[position] += 0.08 * (rate - acceptance[position])
+
+    def observe_mtp(self, depth, accepted, milliseconds, *, stable, draft_depths=None):
+        samples = {depth: accepted}
+        if self.acceptance_by_depth and draft_depths is not None:
+            # A transition can verify only a prefix of the original block.
+            samples = {}
+            for drafted, count in zip(draft_depths, accepted):
+                samples.setdefault(drafted or depth, []).append(count)
+        # Width curves train only once the calibration walk is done: during
+        # the walk each width gets 2-3 samples that would shadow the pooled
+        # prefix with flat-prior noise. The pooled curve always trains, so
+        # a width that has not run yet still scores from a measured prefix.
+        walk = any(
+            len(self.costs.get(d, ())) < 3 for d in range(1, self.max_depth + 1)
+        )
+        for drafted, counts in samples.items():
+            acceptance = self.acceptance_by_depth.get(drafted)
+            if acceptance is not None and not walk:
+                self._observe_acceptance(acceptance, counts, depth)
+        self._observe_acceptance(self.acceptance, accepted, depth)
         if milliseconds is None or self.fixed:
             return
         self.elapsed_ms += milliseconds

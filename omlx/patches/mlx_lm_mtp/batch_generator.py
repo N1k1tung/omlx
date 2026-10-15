@@ -844,6 +844,8 @@ class _MtpState:
     # Pending draft tokens for the next verify forward: (depth,) uint32 array.
     # Host-side ids are read in the verify cycle's single sync, not here.
     drafts: Optional[Any] = None
+    # Original block depth before verification clips its prefix.
+    draft_depth: int | None = None
     # Per-draft raw logprob rows (vocab,) — emitted as the accepted drafts'
     # logprobs (PR 990 contract) — and sampler-filtered rows for stochastic
     # acceptance. Lazy arrays; only evaluated if a consumer touches them.
@@ -1395,10 +1397,14 @@ def _batch_policy_for_next(gen_batch: Any):
         if policy is not None:
             memory.retired(policy)
         chain, depth, _ = _resolve_mtp_chain_depth(gen_batch.model)
+        drafter = _drafter_for(gen_batch.model)
         policy = BatchPolicy(
             gen_batch.uids,
             depth if chain else 1,
             fixed=_mtp_depth_fixed(gen_batch.model),
+            acceptance_by_depth=(
+                drafter is not None and not getattr(drafter, "causal", False)
+            ),
         )
         memory.seed(policy)
         gen_batch._omlx_mtp_batch_policy = policy
@@ -2598,6 +2604,7 @@ class _DepthController:
         marginal_ms: Optional[float] = None,
         exit_margin: Optional[float] = None,
         seed: Optional["_DepthController"] = None,
+        acceptance_by_depth: bool = False,
     ):
         if marginal_ms:
             self.MARGINAL_MS = float(marginal_ms)
@@ -2608,6 +2615,16 @@ class _DepthController:
         # A position never reached yet (None) borrows the estimate of the
         # position before it; a flat 0.6 prior kept deep drafts unexplored.
         self.p: List[Optional[float]] = [0.6] + [None] * (self.max_depth - 1)
+        # Noncausal block widths change earlier proposals too, unlike AR MTP,
+        # so each width keeps its own curve. A width that has not run yet
+        # scores through _p_eff from the pooled curve above, which trains at
+        # every drafted width — width-only priors left unrun widths
+        # unscoreable and locked the controller onto shallow depths.
+        self.p_by_depth = (
+            {d: [None] * d for d in range(1, self.max_depth + 1)}
+            if acceptance_by_depth
+            else {}
+        )
         self.t: Dict[int, float] = {}
         self.t_age: Dict[int, float] = {}  # ms since each depth was measured
         self.cycles = 0
@@ -2632,6 +2649,8 @@ class _DepthController:
         """Reuse estimates, then remeasure costs in the new request's warmup."""
         for j in range(min(self.max_depth, len(seed.p))):
             self.p[j] = seed.p[j]
+        for d in self.p_by_depth.keys() & seed.p_by_depth.keys():
+            self.p_by_depth[d] = seed.p_by_depth[d][:]
         self.t = {d: v for d, v in seed.t.items() if d <= self.max_depth}
         self.t_age = {d: math.inf for d in self.t}
 
@@ -2641,16 +2660,28 @@ class _DepthController:
         accepted: int,
         cycle_ms: float,
         time_sample: bool = True,
+        draft_depth: int | None = None,
     ) -> None:
         self.cycles += 1
         used = max(0, min(int(used), self.max_depth))
         accepted = max(0, min(int(accepted), used))
         # Acceptance: token-domain EMA (a property of model/content, not load).
         a = self.ALPHA
+        p = self.p_by_depth.get(used if draft_depth is None else draft_depth, self.p)
         for j in range(used):
-            if self.p[j] is None:
-                self.p[j] = self._p_eff(j)
             hit = 1.0 if j < accepted else 0.0
+            if p is not self.p and not self._warmup:
+                # Width curves refine the pooled one once the warmup sweep
+                # is done; during the sweep each width gets only 1-3
+                # samples, which would shadow the pooled prefix with
+                # flat-prior noise. The pooled curve below trains at every
+                # drafted width, so a width that has not run yet still
+                # scores from a measured prefix.
+                if p[j] is None:
+                    p[j] = self._p_eff(j, p)
+                p[j] = (1.0 - a) * p[j] + a * hit
+            if self.p[j] is None:
+                self.p[j] = self._p_eff(j, self.p)
             self.p[j] = (1.0 - a) * self.p[j] + a * hit
             if j >= accepted:
                 break
@@ -2779,16 +2810,23 @@ class _DepthController:
         ref = min(self.t, key=lambda x: abs(x - d))
         return max(1e-3, self.t[ref] + self._marginal_est() * (d - ref))
 
-    def _p_eff(self, j: int) -> float:
-        while self.p[j] is None:
+    def _p_eff(self, j: int, p=None) -> float:
+        """Acceptance at position j: the curve's own measurement, else the
+        pooled measurement (trained at every drafted width), else the newest
+        earlier measurement of either curve."""
+        own = self.p if p is None else p
+        while own[j] is None and self.p[j] is None:
             j -= 1
+        if own[j] is not None:
+            return own[j]
         return self.p[j]
 
     def _score(self, d: int) -> float:
         expected = 1.0
         run = 1.0
+        p = self.p_by_depth.get(d, self.p)
         for j in range(d):
-            run *= self._p_eff(j)
+            run *= self._p_eff(j, p)
             expected += run
         return expected / max(1e-6, self._t_est(d))
 
@@ -3259,6 +3297,9 @@ def _post_init_mtp(gen_batch: Any, *, verify_result=None, priming_offset=None) -
                     marginal_ms=getattr(gen_batch.model, "_omlx_mtp_marginal_ms", None),
                     exit_margin=_effective_loop_tax(gen_batch.model),
                     seed=getattr(gen_batch.model, "_omlx_mtp_depth_seed", None),
+                    acceptance_by_depth=(
+                        drafter is not None and not getattr(drafter, "causal", False)
+                    ),
                 )
                 try:
                     # The next sequence starts from this one's latest estimates.
@@ -3266,9 +3307,8 @@ def _post_init_mtp(gen_batch: Any, *, verify_result=None, priming_offset=None) -
                 except Exception:
                     pass
         if drafter is not None:
-            # Block drafters keep their own per-request context and draft
-            # the whole block; the depth controller only narrows the
-            # verified part. The captured hidden of main_tok is the newest
+            # Block drafters keep their own per-request context and use the
+            # selected depth. The captured hidden of main_tok is the newest
             # context entry; next_main is the anchor.
             state.mtp_cache = []
             state.next_main = _ensure_uint32(next_main_tok)
@@ -3388,6 +3428,7 @@ def _run_verify_cycle_batched(gen_batch: Any, batch_state: _MtpBatchState) -> An
     copied = any(state.copy_drafts for state in states)
     previous = [(state.stats.cycles, state.stats.accepts) for state in states]
     requested = policy.cur if policy is not None else None
+    draft_depths = [state.draft_depth for state in states]
     if policy is not None:
         for state in states:
             state.controller = None
@@ -3436,7 +3477,13 @@ def _run_verify_cycle_batched(gen_batch: Any, batch_state: _MtpBatchState) -> An
         accepted = [
             state.stats.accepts - count for state, (_, count) in zip(states, previous)
         ]
-        policy.observe_mtp(depths[0], accepted, elapsed, stable=depths[0] == requested)
+        policy.observe_mtp(
+            depths[0],
+            accepted,
+            elapsed,
+            stable=depths[0] == requested,
+            draft_depths=draft_depths,
+        )
         if elapsed is not None:
             logger.debug(
                 "Lightning MTP batch cost: rows=%d depth=%d accepts=%s ms=%.3f next_depth=%d",
@@ -3867,11 +3914,7 @@ def _dense_q_rows(draft_accept_lps) -> list:
 
 
 def _clip_block_drafts(state: _MtpState, limit: int) -> None:
-    """Keep the first ``limit`` drafts of a block for this verify.
-
-    Block drafters pick positions left to right, so a prefix of the block
-    with its draft distributions is a complete proposal.
-    """
+    """Trim pending proposals and their distributions when the draft depth shrinks."""
     drafts = state.drafts
     if drafts is None or limit >= int(drafts.shape[0]):
         return
@@ -4115,6 +4158,7 @@ def _run_verify_cycle_chain(
     # Adaptive depth: the chain may have drafted fewer than state.depth
     # tokens this cycle — the verify window follows the actual drafts.
     k = int(state.drafts.shape[0])
+    draft_depth = state.draft_depth
     copy_cycle = state.copy_drafts
     cycle_t0 = time.perf_counter()
 
@@ -4432,6 +4476,12 @@ def _run_verify_cycle_chain(
                 + verify_ms
                 + shared_commit_ms,
                 time_sample=not keepalive and not untimed,
+                **(
+                    {"draft_depth": draft_depth}
+                    if drafter is not None
+                    and isinstance(state.controller, _DepthController)
+                    else {}
+                ),
             )
             _maybe_finish_mtp_reentry_probe(
                 gen_batch,

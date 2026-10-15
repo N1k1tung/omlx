@@ -3401,8 +3401,8 @@ def test_batch_cost_parking_and_reentry_preserve_tokens(
     park = BatchPolicy.park
     parks = []
 
-    def measured_mtp(self, depth, accepted, milliseconds, *, stable):
-        mtp(self, depth, accepted, 40.0, stable=stable)
+    def measured_mtp(self, depth, accepted, milliseconds, **kwargs):
+        mtp(self, depth, accepted, 40.0, **kwargs)
 
     def short_cooldown(self):
         park(self)
@@ -3818,8 +3818,9 @@ def test_text_targets_return_drafter_layer_captures(family, apply_drafter_target
 
 
 @pytest.mark.parametrize("make_target", [_tiny_qwen3, _tiny_laguna])
+@pytest.mark.parametrize("adaptive", [False, True])
 def test_plain_attention_target_drafts_like_plain_decode(
-    monkeypatch, apply_drafter_target, make_target
+    monkeypatch, apply_drafter_target, make_target, adaptive
 ):
     """A Qwen3 or Laguna target with a DFlash2 drafter emits the plain decode
     tokens, and rejected verify rows are trimmed from the KV caches, also
@@ -3869,7 +3870,9 @@ def test_plain_attention_target_drafts_like_plain_decode(
         strict=False,
     )
     draft.bind(model)
-    drafter = dd.DFlashDrafter(draft, block_size=4, source_path="tiny", adaptive=False)
+    drafter = dd.DFlashDrafter(
+        draft, block_size=4, source_path="tiny", adaptive=adaptive
+    )
     dd.attach_drafter(model, drafter)
     assert model._omlx_mtp_multi_request is False
     trims = []
@@ -5016,9 +5019,9 @@ def test_batch_policy_skips_copied_windows(monkeypatch):
             copied_cycles.append(any(state.copy_drafts for state in states))
             return verify(gen_batch, batch_state)
 
-        def observe_mtp(self, depth, accepted, milliseconds, *, stable):
+        def observe_mtp(self, depth, accepted, milliseconds, **kwargs):
             decisions.append(copied_cycles[-1])
-            mtp(self, depth, accepted, milliseconds, stable=stable)
+            mtp(self, depth, accepted, milliseconds, **kwargs)
 
         monkeypatch.setattr(context_copy.ContextCopy, "propose", propose)
         monkeypatch.setattr(bg, "_run_verify_cycle_batched", verify_batched)
@@ -5112,6 +5115,80 @@ def calibrated(batch=4, depth=2):
         policy.observe_standard(cost)
     assert not policy.needs_standard()
     return policy
+
+
+@pytest.mark.parametrize("batched", [False, True])
+@pytest.mark.parametrize("independent", [False, True])
+def test_noncausal_acceptance_is_scored_per_draft_width(batched, independent):
+    policy = (
+        BatchPolicy([0, 1], 3, acceptance_by_depth=independent)
+        if batched
+        else bg._DepthController(3, acceptance_by_depth=independent)
+    )
+    if batched:
+        # Past the calibration walk, or the width curves would stay empty.
+        policy.costs = {d: [10.0, 10.0, 10.0] for d in (1, 2, 3)}
+    for _ in range(100):
+        for depth, accepted in ((1, 1), (3, 0)):
+            if batched:
+                policy.observe_mtp(depth, [accepted] * 2, 10, stable=True)
+            else:
+                policy.observe(depth, accepted, 10)
+    score = policy.score if batched else policy._score
+    assert (score(1) > score(3)) == independent
+    if independent:
+        # Clipping a wide proposal must not teach the narrow block's curve.
+        narrow = score(1)
+        if batched:
+            policy.observe_mtp(1, [0, 0], 10, stable=False, draft_depths=[3, 3])
+        else:
+            policy.observe(1, 0, 10, draft_depth=3)
+        assert score(1) == narrow
+
+
+def test_dflash_acceptance_seed_is_copied_per_width():
+    seed = bg._DepthController(3, acceptance_by_depth=True)
+    seed._warmup.clear()  # past the sweep, or width curves would not train
+    seed.observe(2, 2, 10)
+    seed.observe(3, 3, 10)
+    child = bg._DepthController(2, seed=seed, acceptance_by_depth=True)
+    child._warmup.clear()
+    assert child.p_by_depth == {d: seed.p_by_depth[d] for d in (1, 2)}
+    child.observe(2, 0, 10)
+    assert child.p_by_depth[2] != seed.p_by_depth[2]
+
+
+def test_dflash_batch_pools_acceptance_only_with_the_same_draft_width():
+    policy = BatchPolicy([0, 1], 3, acceptance_by_depth=True)
+    # Past the calibration walk, or the width curves would stay empty.
+    policy.costs = {d: [10.0, 10.0, 10.0] for d in (1, 2, 3)}
+    policy.observe_mtp(1, [0, 1], None, stable=False, draft_depths=[3, 1])
+    assert policy.acceptance_by_depth[1] == pytest.approx([0.632])
+    assert policy.acceptance_by_depth[3][0] == pytest.approx(0.552)
+    assert policy.acceptance_by_depth[3][1:] == [None, None]
+    # The pooled curve still trains at every drafted width.
+    assert policy.acceptance[0] == pytest.approx(0.592)
+    policy.start_parked(1)
+    policy.observe_standard(10)
+    assert policy.acceptance_by_depth == {
+        1: [None],
+        2: [None, None],
+        3: [None, None, None],
+    }
+
+
+def test_unmeasured_width_borrows_the_pooled_prefix():
+    controller = bg._DepthController(3, acceptance_by_depth=True)
+    for _ in range(60):
+        controller.observe(2, 2, 10)
+    # Width 3 never ran: its curve stays empty and its acceptance reads
+    # the pooled prefix the width-2 cycles trained. A flat prior here is
+    # what locked the controller onto shallow widths.
+    assert controller.p_by_depth[3] == [None, None, None]
+    assert controller.p[1] > 0.95
+    assert controller._p_eff(1, controller.p_by_depth[3]) == pytest.approx(
+        controller.p[1]
+    )
 
 
 def test_whole_batch_cost_can_lose_despite_per_row_acceptance():

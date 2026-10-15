@@ -32,6 +32,7 @@ from mlx_vlm.speculative.drafters.qwen3_dflash.config import (
 from mlx_vlm.speculative.drafters.qwen3_dflash.dflash import DFlashDraftModel
 
 from omlx.model_settings import ModelSettings
+from omlx.patches.mlx_lm_mtp import batch_generator as bg
 from omlx.request import Request, RequestStatus, SamplingParams
 from omlx.scheduler import Scheduler
 from omlx.speculative import dflash as dd
@@ -245,16 +246,14 @@ def _captured(n, seed):
     return [mx.random.normal((1, n, HIDDEN)) for _ in TARGET_LAYER_IDS]
 
 
-def _run_cycles(drafter, plan, cycle_offset=0):
+def _run_cycles(drafter, plan, cycle_offset=0, depth=BLOCK - 1):
     """plan: per cycle, {uid: (segment_len, anchor)}; returns proposals per cycle."""
     outputs = []
     for cycle, rows in enumerate(plan, start=cycle_offset):
         jobs = []
         states = []
         for uid, (n, anchor) in rows.items():
-            state = SimpleNamespace(
-                uid=uid, drafts=None, draft_lps=None, draft_accept_lps=None
-            )
+            state = bg._MtpState(uid=uid, depth=depth)
             committed = mx.array([anchor], dtype=mx.uint32)
             jobs.append(
                 (
@@ -273,7 +272,8 @@ def _run_cycles(drafter, plan, cycle_offset=0):
 
 @DRAFTER_FAMILIES
 @pytest.mark.parametrize("window", [1, WINDOW])
-def test_batched_forward_matches_rows_drafted_alone(make_drafter, window):
+@pytest.mark.parametrize("depth", [1, BLOCK - 1])
+def test_batched_forward_matches_rows_drafted_alone(make_drafter, window, depth):
     """Padding, masks, vector RoPE offsets and ring writes must not leak across rows."""
     plan = [
         {0: (5, 3), 1: (1, 9)},
@@ -290,27 +290,29 @@ def test_batched_forward_matches_rows_drafted_alone(make_drafter, window):
         for cycle, rows in enumerate(solo_plan):
             if rows:
                 expected[cycle].update(
-                    _run_cycles(alone, [rows], cycle_offset=cycle)[0]
+                    _run_cycles(alone, [rows], cycle_offset=cycle, depth=depth)[0]
                 )
 
     batched = make_drafter()
     batched._window_size = window
-    got = _run_cycles(batched, plan)
+    got = _run_cycles(batched, plan, depth=depth)
     assert got == expected
+    assert all(len(tokens) == depth for rows in got for tokens in rows.values())
     # The ring saw every context token, including the ones that fell out of
     # the window on the long segments.
     assert batched.context_length(0) == sum(rows[0][0] for rows in plan if 0 in rows)
     assert batched.context_length(2) == sum(rows[2][0] for rows in plan if 2 in rows)
 
 
-def test_predraft_adopt_matches_drafting_committed_rows():
+@DRAFTER_FAMILIES
+@pytest.mark.parametrize("depth", [1, BLOCK - 1])
+def test_predraft_adopt_matches_drafting_committed_rows(make_drafter, depth):
     """A predraft over every verify row equals drafting the committed rows, and
     a discarded one leaves the ring as it was, across ring wrap-around."""
 
     def cycle(drafter, uid, captured, count, anchor, mode):
-        state = SimpleNamespace(
-            uid=uid, drafts=None, draft_lps=None, draft_accept_lps=None
-        )
+        state = bg._MtpState(uid=uid, depth=BLOCK - 1)
+        state.controller = SimpleNamespace(cur=depth)
         if mode == "plain":
             committed = mx.array([anchor], dtype=mx.uint32)
             drafter.draft(
@@ -328,20 +330,19 @@ def test_predraft_adopt_matches_drafting_committed_rows():
                 drafter.draft(
                     [(None, state, [c[:, :count] for c in captured], committed, None)]
                 )
+        assert state.draft_depth == len(state.drafts) == depth
         return state.drafts.tolist()
 
     counts = [2, 4, 1, 4, 3, 2, 4, 1]
     for mode in ("adopt", "discard"):
-        plain, other = _tiny_drafter(), _tiny_drafter()
+        plain, other = make_drafter(), make_drafter()
         for d in (plain, other):
             d.seed(0, _captured(WINDOW - 3, seed=77))
             d.draft(
                 [
                     (
                         None,
-                        SimpleNamespace(
-                            uid=0, drafts=None, draft_lps=None, draft_accept_lps=None
-                        ),
+                        bg._MtpState(uid=0, depth=depth),
                         [],
                         mx.array([2], dtype=mx.uint32),
                         None,
@@ -355,20 +356,28 @@ def test_predraft_adopt_matches_drafting_committed_rows():
         assert other.context_length(0) == plain.context_length(0)
 
 
-def test_pending_captures_stay_within_the_window():
+@pytest.mark.parametrize("parked", [False, True])
+def test_pending_captures_stay_within_the_window(parked):
     """Decode steps with drafting off keep only the attended rows, at their positions."""
     kept, tail = _tiny_drafter(), _tiny_drafter()
     rows = _captured(30, seed=9)
+    state = bg._MtpState(uid=0, depth=0)
     for j in range(30):
-        kept.observe([0], [layer[:, j : j + 1] for layer in rows])
+        captured = [layer[:, j : j + 1] for layer in rows]
+        if parked:
+            kept.draft([(None, state, captured, mx.array([5]), None)])
+            assert state.drafts.size == 0
+            assert not kept.predraft(
+                None, state, captured, mx.array([1]), mx.array([5])
+            )
+        else:
+            kept.observe([0], captured)
     assert sum(p.shape[1] for p in kept._rows[0].pending) == kept.ring_slots
     tail._row(0).fed = 30 - tail.ring_slots
     tail.seed(0, [layer[:, 30 - tail.ring_slots :] for layer in rows])
     drafts = []
     for drafter in (kept, tail):
-        state = SimpleNamespace(
-            uid=0, drafts=None, draft_lps=None, draft_accept_lps=None
-        )
+        state = bg._MtpState(uid=0, depth=drafter.depth)
         drafter.draft([(None, state, [], mx.array([5], dtype=mx.uint32), None)])
         drafts.append(state.drafts.tolist())
     assert drafts[0] == drafts[1]
@@ -429,7 +438,7 @@ def test_prefill_seed_binds_to_uid_and_window_slicing():
 
 
 def _draft_one(drafter, uid, captured, anchor):
-    state = SimpleNamespace(uid=uid, drafts=None, draft_lps=None, draft_accept_lps=None)
+    state = bg._MtpState(uid=uid, depth=drafter.depth)
     drafter.draft([(None, state, captured, mx.array([anchor], dtype=mx.uint32), None)])
     return state.drafts.tolist()
 
@@ -616,7 +625,8 @@ def test_reprefill_retry_discards_failed_drafter_context(
         scheduler.deep_reset()
 
 
-def test_sampled_rows_get_sparse_candidate_distributions():
+@pytest.mark.parametrize("block", [2, BLOCK])
+def test_sampled_rows_get_sparse_candidate_distributions(block):
     """Stochastic rows sample from the selector's candidates and expose q."""
     from omlx.utils.sampling import make_sampler
 
@@ -634,13 +644,13 @@ def test_sampled_rows_get_sparse_candidate_distributions():
                 seed,
             )
         )
-    proposals = drafter._draft_batched(rows)
+    proposals = drafter._draft_batched(rows, block_size=block)
     assert len(proposals) == 3
     greedy_tokens, greedy_q = proposals[0]
-    assert greedy_tokens.shape == (1, BLOCK - 1) and greedy_q == []
+    assert greedy_tokens.shape == (1, block - 1) and greedy_q == []
     for tokens, accept in proposals[1:]:
-        assert tokens.shape == (1, BLOCK - 1)
-        assert len(accept) == BLOCK - 1
+        assert tokens.shape == (1, block - 1)
+        assert len(accept) == block - 1
         for position, q in enumerate(accept):
             assert q.shape == (VOCAB,)
             probs = mx.exp(q)
@@ -662,7 +672,8 @@ def test_sampled_rows_get_sparse_candidate_distributions():
     ],
     ids=["dflash2", "laguna", "muse", "dspark"],
 )
-def test_short_context_matches_reference_draft_block(make_drafter, longest):
+@pytest.mark.parametrize("block", [2, BLOCK])
+def test_short_context_matches_reference_draft_block(make_drafter, longest, block):
     """Ring slots not yet written must stay out of attention."""
     for length in (1, 3, longest):
         drafter = make_drafter()
@@ -672,11 +683,11 @@ def test_short_context_matches_reference_draft_block(make_drafter, longest):
         for layer_cache in cache:
             layer_cache.offset = 0
         expected = drafter.model.draft_block(
-            anchor, context, cache, BLOCK, lambda logits: mx.argmax(logits, axis=-1)
+            anchor, context, cache, block, lambda logits: mx.argmax(logits, axis=-1)
         )
         row = drafter._row(0)
         got = drafter._draft_batched(
-            [(SimpleNamespace(uid=0), row, context, anchor, None)]
+            [(SimpleNamespace(uid=0), row, context, anchor, None)], block_size=block
         )[0][0]
         assert got.tolist() == expected.tolist()
 
