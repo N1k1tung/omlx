@@ -654,14 +654,15 @@ class TestUsesNativeReasoningContent:
             preserve_thinking_default=True,
         )
 
-    def test_detects_muse_glimmer(self):
+    @pytest.mark.parametrize("model_type", ["muse_glimmer", "muse_spark"])
+    def test_detects_muse_family(self, model_type):
         assert uses_native_reasoning_content(
             "any-name",
-            config_model_type="muse_glimmer",
+            config_model_type=model_type,
         )
         assert uses_native_reasoning_content(
             "any-name",
-            engine_model_type="muse_glimmer",
+            engine_model_type=model_type,
         )
 
     def test_plain_model_is_not_native(self):

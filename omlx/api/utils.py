@@ -21,6 +21,7 @@ _NATIVE_REASONING_MODEL_TYPES = {
     # Muse Glimmer's chat template renders history reasoning_content into
     # <|start|>assistant to=self<|message|> blocks.
     "muse_glimmer",
+    "muse_spark",
     # K2 requires a reasoning field for every assistant turn.
     "k2_horizon",
 }
