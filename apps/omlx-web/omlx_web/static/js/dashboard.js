@@ -194,7 +194,7 @@
                 usage: { usage_history: true },
                 huggingface: { endpoint: '', hf_cache_enabled: true, hf_cache_path: '' },
                 network: { http_proxy: '', https_proxy: '', no_proxy: '', ca_bundle: '' },
-                auth: { api_key_set: false, api_key: '', skip_api_key_verification: false, sub_keys: [] },
+                auth: { api_key_set: false, api_key: '', skip_api_key_verification: false, allow_unauthenticated_inference: false, sub_keys: [] },
                 claude_code: { mode: 'cloud', opus_model: null, sonnet_model: null, haiku_model: null },
                 integrations: {
                     copilot_model: null,
@@ -1339,6 +1339,15 @@
                 }
             },
 
+            toggleUnauthenticatedInference() {
+                const auth = this.globalSettings.auth;
+                if (!auth.allow_unauthenticated_inference
+                    && !window.confirm(window.t('settings.auth.keyless_inference_confirm'))) {
+                    return;
+                }
+                auth.allow_unauthenticated_inference = !auth.allow_unauthenticated_inference;
+            },
+
             isLoopbackBindHost(value) {
                 const hosts = String(value || '')
                     .split(',')
@@ -1474,6 +1483,7 @@
                             network_ca_bundle: this.globalSettings.network.ca_bundle,
                             ...(this.globalSettings.auth.api_key ? { api_key: this.globalSettings.auth.api_key } : {}),
                             skip_api_key_verification: this.globalSettings.auth.skip_api_key_verification,
+                            allow_unauthenticated_inference: this.globalSettings.auth.allow_unauthenticated_inference,
                             idle_timeout_seconds: this.globalSettings.idle_timeout?.idle_timeout_seconds ?? null,
                         }),
                     });
@@ -3010,6 +3020,14 @@
                 // validated family has routed-expert A8, not every qwen4*.
                 return type === 'qwen4_exp'
                     || ['qwen3_5', 'qwen3_6', 'qwen3_8'].some(prefix => type.startsWith(prefix));
+            },
+
+            // The kernels need native INT8 tensor ops (M5-series or newer).
+            // A saved "on" keeps the toggle so it can be turned off.
+            showsQwenOqA8(model) {
+                return this.isQwenOqA8Model(model)
+                    && (model?.qwen35_oq_a8_supported === true
+                        || model?.settings?.qwen35_oq_a8_enabled === true);
             },
 
             validateQwenOqA8Settings() {

@@ -112,3 +112,21 @@ def test_start_tags_close_before_the_next_element():
         parser.feed(page.read_text(encoding="utf-8"))
         broken += [f"{page.relative_to(ROOT)} {item}" for item in parser.swallowed]
     assert not broken, "\n".join(broken)
+
+
+SWITCH = re.compile(r"<button\b[^>]*\bw-11 h-6\b[^>]*>", re.DOTALL)
+DTYPE = re.compile(r"<button\b[^>]*\boqDtype\b[^>]*>", re.DOTALL)
+
+
+def test_toggle_controls_expose_their_state():
+    # Switches and the dtype buttons paint their state in colour only, so a
+    # screen reader hears "button" whatever their state.
+    unexposed = []
+    for page in PAGES:
+        source = page.read_text(encoding="utf-8")
+        tags = [tag for tag in SWITCH.findall(source) if "aria-checked" not in tag]
+        tags += [tag for tag in DTYPE.findall(source) if "aria-pressed" not in tag]
+        unexposed += [
+            f"{page.relative_to(ROOT)} {' '.join(tag.split())}" for tag in tags
+        ]
+    assert not unexposed, "state is not exposed for:\n" + "\n".join(unexposed)

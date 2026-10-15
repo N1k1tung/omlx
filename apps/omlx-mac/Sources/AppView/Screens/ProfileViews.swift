@@ -372,7 +372,7 @@ struct ActiveProfileBanner: View {
                 .foregroundStyle(theme.textSecondary)
         case .defaults:
             Text(String(localized: "profile.banner.defaults.subtitle",
-                        defaultValue: "Using server defaults · edit any field to start a working profile",
+                        defaultValue: "Changes save to this model automatically",
                         comment: "Profile banner subtitle when no profile is assigned"))
                 .font(.omlxText(11.5))
                 .foregroundStyle(theme.textSecondary)
@@ -610,7 +610,7 @@ struct ProfileDetailCard: View {
                 }
                 if showUpdate, let onUpdateFromWorking {
                     Button(String(localized: "profile.detail.action.update_with_working",
-                                  defaultValue: "Update with working",
+                                  defaultValue: "Update with Current Settings",
                                   comment: "Profile detail card button that writes the current working edits into this named profile")) { onUpdateFromWorking() }
                         .buttonStyle(.omlx(.normal, size: .small))
                 }

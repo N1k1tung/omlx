@@ -7958,6 +7958,49 @@ class TestStopStringOutputBuffer:
         assert outputs[-1].finish_reason == "stop"
         assert sum(output.finished for output in outputs) == 1
 
+    @pytest.mark.parametrize("terminal_reason", ["length", "stop"])
+    def test_deepseek_v41_calls_without_outer_close(
+        self, mock_model, monkeypatch, terminal_reason
+    ):
+        from omlx.patches.deepseek_v41 import output_parser
+
+        scheduler = self._setup(mock_model)
+        request = scheduler.running["stop-output"]
+        request.sampling_params.stop = []
+        tokenizer = scheduler.tokenizer
+        pieces = [
+            "Prose.\n\n",
+            '<｜DSML｜ calls>\n<｜DSML｜ invoke name="get">\n',
+            '<｜DSML｜ parameter name="city" string="true">Seoul</｜DSML｜ parameter>\n',
+            "</｜DSML｜ invoke>\n",
+        ]
+        tokenizer.pieces = {**tokenizer.pieces, **dict(enumerate(pieces, 100))}
+        scheduler._build_state_machine(request)
+        monkeypatch.setattr(
+            output_parser,
+            "create_streaming_detokenizer",
+            lambda tokenizer, model_path: _StopSequenceDetokenizer(tokenizer),
+        )
+        session = output_parser.DeepSeekV41OutputParserSession(tokenizer)
+        scheduler._output_parser_sessions[request.request_id] = session
+        scheduler._get_output_parser_session = lambda request_id: session
+        responses = [self._response(100 + i) for i in range(len(pieces))]
+        if terminal_reason == "stop":
+            responses.append(self._response(tokenizer.eos_token_id, "stop"))
+        else:
+            responses[-1].finish_reason = "length"
+
+        outputs, _ = scheduler._process_batch_responses(responses)
+
+        if terminal_reason == "stop":
+            assert outputs[-1].finish_reason == "tool_calls"
+            assert [call["name"] for call in outputs[-1].tool_calls] == ["get"]
+            assert outputs[-1].output_text == "Prose.\n\n"
+        else:
+            assert outputs[-1].finish_reason == "length"
+            assert not outputs[-1].tool_calls
+            assert outputs[-1].output_text == "".join(pieces)
+
     def test_partial_stop_prefix_is_flushed_on_eos(self, mock_model):
         scheduler = self._setup(mock_model)
         responses = [

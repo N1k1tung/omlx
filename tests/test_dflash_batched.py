@@ -12,6 +12,8 @@ import numpy as np
 import pytest
 from mlx_vlm.speculative.drafters.dflash2.config import DFlash2Config
 from mlx_vlm.speculative.drafters.dflash2.dflash2 import DFlash2DraftModel
+from mlx_vlm.speculative.drafters.dspark.config import DSparkConfig
+from mlx_vlm.speculative.drafters.dspark.dspark import DSparkDraftModel
 from mlx_vlm.speculative.drafters.laguna_dflash import (
     LagunaDFlashDraftModel,
 )
@@ -190,10 +192,51 @@ def _tiny_muse_drafter(seed=0):
     return dd.DFlashDrafter(model, block_size=BLOCK, source_path="tiny")
 
 
+def _tiny_dspark_drafter(seed=0):
+    """Anchor-slot block layout and Markov-corrected proposals."""
+    config = DSparkConfig.from_dict(
+        {
+            "model_type": "qwen3",
+            "hidden_size": HIDDEN,
+            "intermediate_size": 48,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 2,
+            "head_dim": 8,
+            "vocab_size": VOCAB,
+            "rms_norm_eps": 1e-6,
+            "max_position_embeddings": 4096,
+            "num_target_layers": TARGET_LAYERS,
+            "sliding_window": WINDOW,
+            "layer_types": ["sliding_attention", "sliding_attention"],
+            "rope_parameters": {"rope_theta": 10000.0, "rope_type": "default"},
+            "tie_word_embeddings": False,
+            # DSpark checkpoints count proposals; the verify block adds the anchor.
+            "block_size": BLOCK - 1,
+            "dflash_config": {
+                "markov_rank": 8,
+                "mask_token_id": VOCAB - 1,
+                "projector_type": "dspark",
+                "target_layer_ids": TARGET_LAYER_IDS,
+            },
+        }
+    )
+    mx.random.seed(seed)
+    model = DSparkDraftModel(config)
+    params = {
+        key: mx.random.normal(value.shape) * 0.2
+        for key, value in nn.utils.tree_flatten(model.parameters())
+    }
+    model.load_weights(list(params.items()), strict=False)
+    model.bind(_tiny_target())
+    mx.eval(model.parameters())
+    return dd.DFlashDrafter(model, block_size=BLOCK, source_path="tiny")
+
+
 DRAFTER_FAMILIES = pytest.mark.parametrize(
     "make_drafter",
-    [_tiny_drafter, _tiny_laguna_drafter, _tiny_muse_drafter],
-    ids=["dflash2", "laguna", "muse"],
+    [_tiny_drafter, _tiny_laguna_drafter, _tiny_muse_drafter, _tiny_dspark_drafter],
+    ids=["dflash2", "laguna", "muse", "dspark"],
 )
 
 
@@ -615,8 +658,9 @@ def test_sampled_rows_get_sparse_candidate_distributions():
         # Muse's reference windows each query; keep the context inside the
         # window of every block query.
         (_tiny_muse_drafter, WINDOW - BLOCK + 1),
+        (_tiny_dspark_drafter, WINDOW - 1),
     ],
-    ids=["dflash2", "laguna", "muse"],
+    ids=["dflash2", "laguna", "muse", "dspark"],
 )
 def test_short_context_matches_reference_draft_block(make_drafter, longest):
     """Ring slots not yet written must stay out of attention."""

@@ -242,7 +242,11 @@ def _settled_phys_footprint() -> int:
 
 
 def _is_metal_out_of_memory(exc: BaseException | None) -> bool:
-    while exc is not None:
+    # Track visited exceptions: a cause chain can loop (an exception raised
+    # ``from`` itself), and this runs on the event loop during a failed load.
+    seen: set[int] = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
         text = str(exc)
         if (
             "kIOGPUCommandBufferCallbackErrorOutOfMemory" in text

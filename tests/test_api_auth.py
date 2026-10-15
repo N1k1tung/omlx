@@ -696,6 +696,31 @@ class TestUnauthenticatedInference:
         )
         assert response.status_code == 200
 
+    def test_admin_settings_toggle_applies_without_restart(
+        self, configured_server, monkeypatch, tmp_path
+    ):
+        from omlx.admin import routes as admin_routes
+
+        server, settings = configured_server
+        monkeypatch.setattr(admin_routes, "_get_global_settings", lambda: settings)
+        settings.auth.allow_unauthenticated_inference = False
+        client = TestClient(server.app)
+        admin = {"Authorization": "Bearer management-key"}
+        assert client.post("/v1/chat/completions", json={}).status_code == 401
+
+        response = client.post(
+            "/admin/api/global-settings",
+            json={"allow_unauthenticated_inference": True},
+            headers=admin,
+        )
+        assert response.status_code == 200, response.text
+        saved = json.loads((tmp_path / "settings.json").read_text())
+        assert saved["auth"]["allow_unauthenticated_inference"] is True
+        auth = client.get("/admin/api/global-settings", headers=admin).json()["auth"]
+        assert auth["allow_unauthenticated_inference"] is True
+        assert client.post("/v1/chat/completions", json={}).status_code == 422
+        assert client.get("/admin/api/global-settings").status_code == 401
+
     @pytest.mark.parametrize("token", ["sub-key-1234", "wrong-key"])
     def test_admin_api_rejects_other_bearer_keys(
         self, configured_server, token, caplog

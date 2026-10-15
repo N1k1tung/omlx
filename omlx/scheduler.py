@@ -8096,12 +8096,13 @@ class Scheduler:
         # Look for the think_end_str surrounded by whitespace/newlines in string literals
         escaped = re.escape(think_end_str)
         # Match patterns like: \n</think>\n\n or </think> in template strings
-        match = re.search(
-            r"(\\n|\\r|[\n\r])*" + escaped + r"((?:\\n|\\r|[\n\r])*)",
-            template_text,
-        )
-        if not match:
+        pattern = re.compile(r"(\\n|\\r|[\n\r])*" + escaped + r"((?:\\n|\\r|[\n\r])*)")
+        # Templates can mention the bare tag first while parsing history.
+        # Prefer the first wrapped occurrence, which is the rendered close.
+        matches = list(pattern.finditer(template_text))
+        if not matches:
             return None, None
+        match = next((m for m in matches if m.group(0) != think_end_str), matches[0])
 
         # Extract raw leading/trailing whitespace, converting \n escapes to actual newlines
         raw_leading = (
@@ -13152,9 +13153,9 @@ class Scheduler:
                     self._cleanup_prefill_abort_request(request, temp_uid=temp_uid)
                     continue
                 except _PrefillEvictionNeeded as e:
+                    # The paused request keeps its prefix blocks (#2180).
                     self.uid_to_request_id.pop(temp_uid, None)
                     self.request_id_to_uid.pop(request.request_id, None)
-                    self._release_paged_cache_for_request(request.request_id)
                     get_prefill_tracker().remove(request.request_id)
                     self._pause_for_prefill_eviction(request, e.request)
                     break
@@ -13559,6 +13560,9 @@ class Scheduler:
                 finished_ids.add(request_id)
 
                 if parser_session is not None:
+                    notify = getattr(parser_session, "notify_finish_reason", None)
+                    if callable(notify):
+                        notify(response.finish_reason)
                     final_result = parser_session.finalize()
                     if stop_prefix_chars is not None:
                         final_result.stream_text = ""
@@ -13715,8 +13719,8 @@ class Scheduler:
         """Drop a request's paged-cache footprint on rejection paths.
 
         ``add_request`` routes through ``block_aware_cache.fetch_cache``
-        which records the request in ``_request_tables`` and increments
-        ref counts on every prefix-matched paged-cache block. The normal
+        which records a block table in the paged cache manager and
+        increments ref counts on every prefix-matched block. The normal
         completion path releases that state in ``_cleanup_finished``;
         the prefill-rejection paths in ``_advance_chunked_prefills`` /
         ``_schedule_waiting`` must do the same or rejected requests

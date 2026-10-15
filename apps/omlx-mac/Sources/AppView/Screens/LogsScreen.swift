@@ -170,37 +170,79 @@ private struct LogTable: View {
     @Environment(AppServices.self) private var services
     @Environment(\.omlxTheme) private var theme
     @State private var position = ScrollPosition(idType: Int.self)
+    /// Detail card height, kept across selections and launches.
+    @AppStorage("logs.detailHeight") private var savedDetailHeight: Double = 220
+    /// Live height during a drag; saved once the drag ends.
+    @State private var dragHeight: Double?
+    @State private var dragStartHeight: Double?
+
+    private static let handleHeight: CGFloat = 12
+    private static let minDetailHeight: Double = 120
+    private static let minListHeight: Double = 160
 
     var body: some View {
-        VStack(spacing: 8) {
-            if let row = vm.selectedRow {
-                LogDetailCard(row: row, onOpen: { services.requestedSection = $0 },
-                              onClose: { vm.selectedRowID = nil })
-            }
-
+        GeometryReader { geometry in
             VStack(spacing: 0) {
-                LogColumnHeader()
-                Divider().overlay(theme.groupBorder)
-                if vm.rows.isEmpty {
-                    if !vm.isLoading {
-                        Text(vm.emptyMessage)
-                            .font(.omlxText(13))
-                            .foregroundStyle(theme.textTertiary)
-                            .padding(.vertical, 36)
-                    }
-                    Spacer(minLength: 0)
-                } else {
-                    rowList
+                if let row = vm.selectedRow {
+                    LogDetailCard(row: row, onOpen: { services.requestedSection = $0 },
+                                  onClose: { vm.selectedRowID = nil })
+                        .frame(height: clampedDetailHeight(dragHeight ?? savedDetailHeight,
+                                                           total: geometry.size.height))
+                    SplitHandle()
+                        .frame(height: Self.handleHeight)
+                        .gesture(
+                            // Global space: the handle moves with the card, so
+                            // a local translation would shrink as it moves.
+                            DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                                .onChanged { value in
+                                    let start = dragStartHeight ?? clampedDetailHeight(
+                                        savedDetailHeight, total: geometry.size.height)
+                                    dragStartHeight = start
+                                    dragHeight = clampedDetailHeight(
+                                        start + value.translation.height,
+                                        total: geometry.size.height)
+                                }
+                                .onEnded { _ in
+                                    if let dragHeight { savedDetailHeight = dragHeight }
+                                    dragHeight = nil
+                                    dragStartHeight = nil
+                                }
+                        )
                 }
+                listPane
             }
-            .frame(maxWidth: .infinity, minHeight: 200, maxHeight: .infinity)
-            .background(theme.codeBg)
-            .clipShape(RoundedRectangle(cornerRadius: theme.cornerRadius, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: theme.cornerRadius, style: .continuous)
-                    .strokeBorder(theme.groupBorder, lineWidth: 0.5)
-            )
         }
+    }
+
+    private func clampedDetailHeight(_ height: Double, total: CGFloat) -> Double {
+        let upper = max(Self.minDetailHeight,
+                        Double(total - Self.handleHeight) - Self.minListHeight)
+        return min(max(height, Self.minDetailHeight), upper)
+    }
+
+    private var listPane: some View {
+        VStack(spacing: 0) {
+            LogColumnHeader()
+            Divider().overlay(theme.groupBorder)
+            if vm.rows.isEmpty {
+                if !vm.isLoading {
+                    Text(vm.emptyMessage)
+                        .font(.omlxText(13))
+                        .foregroundStyle(theme.textTertiary)
+                        .padding(.vertical, 36)
+                }
+                Spacer(minLength: 0)
+            } else {
+                rowList
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(theme.codeBg)
+        .clipShape(RoundedRectangle(cornerRadius: theme.cornerRadius, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: theme.cornerRadius, style: .continuous)
+                .strokeBorder(theme.groupBorder, lineWidth: 0.5)
+        )
     }
 
     private var rowList: some View {
@@ -227,6 +269,26 @@ private struct LogTable: View {
 
     private func scrollToEdge() {
         position.scrollTo(edge: vm.autoScroll ? .bottom : .top)
+    }
+}
+
+/// Drag area between the detail card and the list. The capsule marks it, and
+/// the pointer turns into the row-resize arrows.
+private struct SplitHandle: View {
+    @Environment(\.omlxTheme) private var theme
+    @State private var hovering = false
+
+    var body: some View {
+        Capsule()
+            .fill(theme.textTertiary.opacity(hovering ? 0.9 : 0.45))
+            .frame(width: 36, height: 4)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .onHover { hovering = $0 }
+            .pointerStyle(.rowResize)
+            .accessibilityLabel(String(localized: "logs.detail.resize",
+                                       defaultValue: "Resize log entry",
+                                       comment: "Accessibility label of the handle that resizes the log detail card"))
     }
 }
 
@@ -465,10 +527,10 @@ private struct LogDetailCard: View {
                 .keyboardShortcut(.escape, modifiers: [])
             }
 
+            // Fills the card, so dragging the split divider shows more lines.
             LogTextView(text: row.record.message, followTail: false, edgeKey: String(row.id),
                         fgColor: NSColor(theme.text), bgColor: NSColor(theme.inputBg))
-                // About one line of height per record line; longer records scroll inside.
-                .frame(height: min(200, 24 + 15 * CGFloat(row.record.lineCount)))
+                .frame(minHeight: 40, maxHeight: .infinity)
                 .clipShape(RoundedRectangle(cornerRadius: theme.rowRadius, style: .continuous))
 
             if let memory = LogParser.memoryGuard(String(row.record.firstLine)) {

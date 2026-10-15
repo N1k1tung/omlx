@@ -4355,13 +4355,13 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "pp TPS"
+            "value" : "PP TPS"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "pp TPS"
+            "value" : "PP TPS"
           }
         },
         "zh-Hans" : {
@@ -4403,13 +4403,13 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "tg TPS"
+            "value" : "TG TPS"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "tg TPS"
+            "value" : "TG TPS"
           }
         },
         "zh-Hans" : {
@@ -5129,13 +5129,13 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "pp TPS"
+            "value" : "PP TPS"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "pp TPS"
+            "value" : "PP TPS"
           }
         },
         "zh-Hans" : {
@@ -5177,13 +5177,13 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "tg TPS"
+            "value" : "TG TPS"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "tg TPS"
+            "value" : "TG TPS"
           }
         },
         "zh-Hans" : {
@@ -5297,19 +5297,19 @@
         "en" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "pp %1$lld / tg %2$lld"
+            "value" : "PP %1$lld / TG %2$lld"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "pp %1$lld / tg %2$lld"
+            "value" : "PP %1$lld / TG %2$lld"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "pp %1$lld / tg %2$lld"
+            "value" : "PP %1$lld / TG %2$lld"
           }
         }
       }
@@ -5465,19 +5465,19 @@
         "en" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "pp %lld"
+            "value" : "PP %lld"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "pp %lld"
+            "value" : "PP %lld"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "pp %lld"
+            "value" : "PP %lld"
           }
         }
       }
@@ -8855,6 +8855,24 @@
         }
       }
     },
+    "logs.detail.resize" : {
+      "comment" : "Accessibility label of the handle that resizes the log detail card",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Resize log entry"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "로그 항목 크기 조절"
+          }
+        }
+      }
+    },
     "logs.detail.title" : {
       "comment" : "Title of the card that shows one log record in full",
       "extractionState" : "manual",
@@ -10535,6 +10553,30 @@
         }
       }
     },
+    "models.delete.confirm_message_hf_cache" : {
+      "comment" : "Body text inside the delete-model confirmation dialog when the model lives in the shared Hugging Face cache",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This model is in the shared Hugging Face cache. Other apps that use the cache will need to download it again."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Эта модель находится в общем кэше Hugging Face. Другим приложениям, использующим этот кэш, придётся загрузить её заново."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此模型位于共享的 Hugging Face 缓存中。使用该缓存的其他应用需要重新下载。"
+          }
+        }
+      }
+    },
     "models.delete.confirm_title" : {
       "comment" : "Confirmation dialog title shown before deleting a model from disk",
       "extractionState" : "manual",
@@ -10603,6 +10645,54 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "未发现模型"
+          }
+        }
+      }
+    },
+    "models.library.hf_cache.badge" : {
+      "comment" : "Badge on a library model found in the shared Hugging Face cache",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "HF cache"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Кэш HF"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "HF 缓存"
+          }
+        }
+      }
+    },
+    "models.library.hf_cache.help" : {
+      "comment" : "Tooltip on the HF cache badge in the model library",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Found in the Hugging Face cache. Other apps that use this cache will need to download it again after you delete it."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Найдено в кэше Hugging Face. После удаления другим приложениям, использующим этот кэш, придётся загрузить модель заново."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "位于 Hugging Face 缓存中。删除后，使用该缓存的其他应用需要重新下载。"
           }
         }
       }
@@ -12502,19 +12592,19 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Using server defaults · edit any field to start a working profile"
+            "value" : "Changes save to this model automatically"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Используются серверные значения по умолчанию · измените любое поле, чтобы начать рабочий профиль"
+            "value" : "Изменения автоматически сохраняются в эту модель"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "使用服务器默认值 · 编辑任何字段以开始工作配置文件"
+            "value" : "更改会自动保存到此模型"
           }
         }
       }
@@ -13030,19 +13120,19 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Update with working"
+            "value" : "Update with Current Settings"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Обновить рабочим профилем"
+            "value" : "Обновить текущими настройками"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "用工作配置更新"
+            "value" : "用当前设置更新"
           }
         }
       }
@@ -14099,30 +14189,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "将当前另存为新配置"
-          }
-        }
-      }
-    },
-    "profile.save.global_drops_model_settings" : {
-      "comment" : "Error shown when saving to a global profile would drop model-specific settings",
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Global profiles keep sampling settings only. Save as a Model profile to keep Lightning MTP, TurboQuant, and other model settings."
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Глобальные профили хранят только параметры сэмплирования. Чтобы сохранить Lightning MTP, TurboQuant и другие настройки модели, выберите модельный профиль."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "全局配置文件仅保存采样设置。要保留 Lightning MTP、TurboQuant 等模型设置，请另存为模型配置文件。"
           }
         }
       }
@@ -17852,19 +17918,19 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Disable API Key Verification"
+            "value" : "Disable All Authentication"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Отключить проверку API-ключа"
+            "value" : "Отключить всю аутентификацию"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "禁用 API 密钥验证"
+            "value" : "禁用所有身份验证"
           }
         }
       }
@@ -17889,6 +17955,126 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "允许未经身份验证的 /v1 和管理员请求。仅用于开发。"
+          }
+        }
+      }
+    },
+    "security.auth.keyless_inference" : {
+      "comment" : "Row label for the toggle that allows keyless inference",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Allow Inference Without API Key"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Разрешить инференс без API-ключа"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "允许无 API 密钥推理"
+          }
+        }
+      }
+    },
+    "security.auth.keyless_inference.confirm_button" : {
+      "comment" : "Button that accepts the keyless inference warning",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "I Understand"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Я понимаю"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "我已了解"
+          }
+        }
+      }
+    },
+    "security.auth.keyless_inference.confirm_message" : {
+      "comment" : "Warning shown before enabling keyless inference",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Anyone who can reach this server will be able to use inference APIs, MCP tools, and web search without an API key.\n\nBy turning this on, you acknowledge that the server will be exposed to attacks from the network, that you understand you are removing this security protection, and that you have put appropriate security measures in place."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Любой, кто может подключиться к этому серверу, сможет использовать API инференса, инструменты MCP и веб-поиск без API-ключа.\n\nВключая этот параметр, вы признаёте, что сервер станет уязвим для атак из сети, понимаете, что снимаете эту защиту, и подтверждаете, что приняли надлежащие меры безопасности."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "任何能访问此服务器的人都将可以无需 API 密钥使用推理 API、MCP 工具和网页搜索。\n\n开启此设置即表示您已知晓服务器将容易受到来自网络的攻击，理解您正在解除此安全保护，并确认已采取适当的安全措施。"
+          }
+        }
+      }
+    },
+    "security.auth.keyless_inference.confirm_title" : {
+      "comment" : "Title of the warning shown before enabling keyless inference",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Allow inference without an API key?"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Разрешить инференс без API-ключа?"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "允许无 API 密钥推理？"
+          }
+        }
+      }
+    },
+    "security.auth.keyless_inference.sub" : {
+      "comment" : "Sublabel for the keyless inference toggle",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Keyless access to inference, MCP tools, and web search. Admin still requires authentication."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Доступ к инференсу, инструментам MCP и веб-поиску без ключа. Администрирование по-прежнему требует аутентификации."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无需密钥即可使用推理、MCP 工具和网页搜索。管理功能仍需要身份验证。"
           }
         }
       }
@@ -20884,6 +21070,66 @@
         }
       }
     },
+    "settings.acceleration.ced_prefill.label" : {
+      "comment" : "Row label for the DeepSeek V4.1 CED prefill toggle",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "CED Prefill Acceleration (DeepSeek V4.1)"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "CED 预填充加速（DeepSeek V4.1）"
+          }
+        }
+      }
+    },
+    "settings.acceleration.ced_prefill.sub" : {
+      "comment" : "Sublabel for the DeepSeek V4.1 CED prefill toggle",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Improves prefill speed by approximately 74–79% in tested configurations. Uses the model’s Causal Encoder–Decoder architecture to reduce decoder prefill computation."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "テストした構成で prefill 速度を約 74–79% 向上させます。モデルの Causal Encoder–Decoder アーキテクチャを利用して、デコーダーの prefill 計算を削減します。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "테스트한 구성에서 prefill 속도를 약 74–79% 높입니다. 모델의 Causal Encoder–Decoder 구조를 활용해 디코더 prefill 연산을 줄입니다."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ускоряет префилл примерно на 74–79 % в протестированных конфигурациях. Использует архитектуру Causal Encoder–Decoder модели, чтобы сократить вычисления префилла декодера."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在测试配置下将预填充速度提升约 74–79%。利用模型的因果编码器–解码器（Causal Encoder–Decoder）架构减少解码器的预填充计算量。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在測試配置下將預填充速度提升約 74–79%。利用模型的因果編碼器–解碼器（Causal Encoder–Decoder）架構減少解碼器的預填充運算量。"
+          }
+        }
+      }
+    },
     "settings.acceleration.mtp.label" : {
       "comment" : "Row label for the Lightning MTP toggle",
       "extractionState" : "manual",
@@ -21028,6 +21274,102 @@
         }
       }
     },
+    "settings.acceleration.mtplx_import.button" : {
+      "comment" : "Button title that imports an MTPLX MTP side-car",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Import MTPLX Side-car"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Импортировать сайдкар MTPLX"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "导入 MTPLX 附加文件"
+          }
+        }
+      }
+    },
+    "settings.acceleration.mtplx_import.label" : {
+      "comment" : "Row label for the one-time MTPLX side-car import action",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "MTPLX Side-car"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Сайдкар MTPLX"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "MTPLX 附加文件"
+          }
+        }
+      }
+    },
+    "settings.acceleration.mtplx_import.sub" : {
+      "comment" : "Sublabel for the MTPLX side-car import action",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Import the model's MTP head into its checkpoint index to unlock Lightning MTP."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Импортировать MTP-голову модели в индекс чекпойнта, чтобы включить Lightning MTP."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "将模型的 MTP 头导入检查点索引以启用 Lightning MTP。"
+          }
+        }
+      }
+    },
+    "settings.acceleration.qwen4_wide_decode.label" : {
+      "comment" : "Row label for the Qwen4 extended fused decode toggle",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Qwen4 Extended Fused Decode"
+          }
+        }
+      }
+    },
+    "settings.acceleration.qwen4_wide_decode.sub" : {
+      "comment" : "Sublabel for the Qwen4 extended fused decode toggle",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Speeds up decode on Qwen4 oQ2.5e, oQ2.7e, oQ6e, oQ8e and 8-bit community models (about 3-6% on an 8-bit model, up to 1.5 GiB more memory). No effect on oQ3e to oQ4e or fp16 builds, and little effect with Lightning MTP on."
+          }
+        }
+      }
+    },
     "settings.acceleration.section" : {
       "comment" : "Section header above the Acceleration settings group",
       "extractionState" : "manual",
@@ -21052,26 +21394,14 @@
         }
       }
     },
-    "settings.acceleration.subtitle" : {
-      "comment" : "Subtitle for the Acceleration settings section",
+    "settings.actions.menu" : {
+      "comment" : "Toolbar menu holding the reset, optimal and recipe actions",
       "extractionState" : "manual",
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Decoding speedups for models that support them."
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ускорение декодирования для моделей, которые его поддерживают."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "为支持加速的模型提供解码速度提升。"
+            "value" : "Settings Actions"
           }
         }
       }
@@ -21460,6 +21790,18 @@
         }
       }
     },
+    "settings.advanced.embedding_audio.section" : {
+      "comment" : "Section header above the embedding audio-input settings",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Audio"
+          }
+        }
+      }
+    },
     "settings.advanced.embedding_audio.sub" : {
       "comment" : "Sublabel for the embedding audio-input toggle",
       "extractionState" : "manual",
@@ -21580,8 +21922,80 @@
         }
       }
     },
+    "settings.advanced.guided_grammar.label" : {
+      "comment" : "Row label for the default guided grammar toggle",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Guided Grammar"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Управляемая грамматика"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "引导语法"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "引導語法"
+          }
+        }
+      }
+    },
+    "settings.advanced.guided_grammar.sub" : {
+      "comment" : "Sublabel for the default guided grammar toggle",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Apply an EBNF grammar by default for this model."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このモデルにデフォルトで EBNF 文法を適用します。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "이 모델에 기본으로 EBNF 문법을 적용합니다."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Применять EBNF-грамматику для этой модели по умолчанию."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "为此模型默认应用 EBNF 语法。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "為此模型預設套用 EBNF 語法。"
+          }
+        }
+      }
+    },
     "settings.advanced.qwen4_ssd_offload.forced" : {
-      "comment" : "Sublabel when Qwen4 PLE SSD offload is forced by memory limits",
+      "comment" : "Sublabel when SSD N-gram offload is forced by memory limits",
       "extractionState" : "manual",
       "localizations" : {
         "en" : {
@@ -21598,42 +22012,6 @@
         }
       }
     },
-    "settings.advanced.qwen4_ssd_offload.label" : {
-      "comment" : "Row label for the Qwen4 PLE SSD mmap toggle",
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "SSD N-gram Offload (Qwen4 only)"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "SSD N-gram 卸载（仅 Qwen4）"
-          }
-        }
-      }
-    },
-    "settings.advanced.qwen4_ssd_offload.sub" : {
-      "comment" : "Sublabel for the Qwen4 PLE SSD mmap toggle",
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Keep the PLE N-gram table on SSD to save memory. Prefill can be slower after context changes."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "将 PLE N-gram 表保留在 SSD 上以节省内存。上下文变化后预填充可能变慢。"
-          }
-        }
-      }
-    },
     "settings.advanced.experimental.section" : {
       "comment" : "Section header above the Experimental settings group",
       "extractionState" : "manual",
@@ -21641,43 +22019,37 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Experimental"
+            "value" : "Experimental Features"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "実験的機能"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "실험적 기능"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Экспериментальное"
+            "value" : "Экспериментальные возможности"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "实验性"
-          }
-        }
-      }
-    },
-    "settings.advanced.experimental.subtitle" : {
-      "comment" : "Subtitle for the Experimental settings section",
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Speculative decoding, KV-cache quantization, and other research features."
+            "value" : "实验性功能"
           }
         },
-        "ru" : {
+        "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Спекулятивное декодирование, квантование KV-кэша и другие исследовательские функции."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "推测性解码、KV 缓存量化及其他研究功能。"
+            "value" : "實驗性功能"
           }
         }
       }
@@ -21749,19 +22121,37 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Override request sampling parameters with configured values"
+            "value" : "Uses these Temperature, Top P and Top K values even when a client or agent requests different ones."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "クライアントやエージェントが別の値を要求しても、ここで設定した Temperature、Top P、Top K を使用します。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "클라이언트나 에이전트가 다른 값을 요청해도 여기 설정한 Temperature, Top P, Top K를 강제합니다."
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Переопределять параметры сэмплирования из запросов настроенными значениями"
+            "value" : "Использует эти значения Temperature, Top P и Top K, даже если клиент или агент запрашивает другие."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "使用配置的值覆盖请求的采样参数"
+            "value" : "即使客户端或智能体请求了不同的值，也强制使用此处设置的 Temperature、Top P 和 Top K。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "即使用戶端或代理請求不同的值，也強制使用此處設定的 Temperature、Top P 與 Top K。"
           }
         }
       }
@@ -22061,19 +22451,37 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Falls back to the model id"
+            "value" : "API requests can also call this model by its alias instead of the model name."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "API リクエストでは、モデル名の代わりにこのエイリアスでもモデルを呼び出せます。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "모델 이름 대신 이 별칭으로도 API에서 모델을 호출할 수 있습니다."
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Если пусто, используется ID модели"
+            "value" : "В запросах API модель также можно вызывать по этому псевдониму вместо имени модели."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "回退到模型 ID"
+            "value" : "API 请求也可以使用此别名（而非模型名称）调用该模型。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "API 請求也可以使用此別名（而非模型名稱）呼叫此模型。"
           }
         }
       }
@@ -22109,19 +22517,37 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Maximum tokens per request"
+            "value" : "Sets the total context size the model can handle. Longer prompts are rejected."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "モデルが扱えるコンテキスト全体のサイズを設定します。これより長いプロンプトは拒否されます。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "모델이 다룰 수 있는 전체 컨텍스트 크기를 정합니다. 이보다 긴 프롬프트는 거부됩니다."
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Максимум токенов на запрос"
+            "value" : "Задаёт общий размер контекста, который может обработать модель. Более длинные запросы отклоняются."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "每个请求的最大 Token 数"
+            "value" : "设置模型可处理的总上下文大小。超出此长度的提示将被拒绝。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "設定模型可處理的總上下文大小。超過此長度的提示會被拒絕。"
           }
         }
       }
@@ -22181,19 +22607,37 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Cap on generated tokens (empty = default)"
+            "value" : "Limits how many tokens the model generates in one turn when the request does not set max_tokens."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "リクエストで max_tokens が指定されていない場合に、1 ターンで生成するトークン数を制限します。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "요청에 max_tokens가 없을 때 모델이 한 턴에 생성하는 토큰 수를 제한합니다."
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Лимит сгенерированных токенов (пусто = значение по умолчанию)"
+            "value" : "Ограничивает число токенов, которые модель генерирует за один ход, если в запросе не задан max_tokens."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "生成 Token 的上限（空 = 默认）"
+            "value" : "当请求未设置 max_tokens 时，限制模型单轮生成的 Token 数量。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "當請求未設定 max_tokens 時，限制模型單次回合生成的 token 數量。"
           }
         }
       }
@@ -22589,19 +23033,73 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Seconds before idle unload (empty = no TTL)"
+            "value" : "Unloads the model automatically after it stays idle this long."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "この時間アイドル状態が続くと、モデルを自動的にアンロードします。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "이 시간 동안 사용되지 않으면 모델을 자동으로 언로드합니다."
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Секунд до выгрузки при простое (пусто = без TTL)"
+            "value" : "Автоматически выгружает модель, если она простаивает дольше этого времени."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "空闲卸载前的秒数（空 = 无 TTL）"
+            "value" : "模型空闲达到此时长后自动卸载。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "模型閒置達到此時間後自動卸載。"
+          }
+        }
+      }
+    },
+    "settings.dflash.conflict.moe_offload" : {
+      "comment" : "Tooltip / sublabel shown when DFlash can't be enabled because MoE expert offload is on",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Disable MoE Expert Offload before enabling DFlash."
+          }
+        }
+      }
+    },
+    "settings.dflash.conflict.mtp" : {
+      "comment" : "Tooltip / sublabel shown when DFlash can't be enabled because Lightning MTP is on",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Disable Lightning MTP before enabling DFlash."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Отключите Lightning MTP перед включением DFlash."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "启用 DFlash 前禁用 Lightning MTP。"
           }
         }
       }
@@ -23494,6 +23992,186 @@
         }
       }
     },
+    "settings.generation.load_defaults" : {
+      "comment" : "Button that fills Generation Defaults from the model's own config files",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Load Defaults"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "デフォルトを読み込む"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "기본값 로드"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Загрузить значения по умолчанию"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "加载默认值"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "載入預設值"
+          }
+        }
+      }
+    },
+    "settings.generation.load_defaults.none" : {
+      "comment" : "Error when the model ships no generation defaults to load",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No config defaults found for this model"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "このモデルのデフォルト設定が見つかりません"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "이 모델의 기본 설정을 찾을 수 없습니다"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Для этой модели не найдено значений по умолчанию"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未找到该模型的配置默认值"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未找到該模型的設定預設值"
+          }
+        }
+      }
+    },
+    "settings.generation.section" : {
+      "comment" : "Section header above the per-model sampling and length defaults",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Generation Defaults"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "生成のデフォルト"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "생성 기본값"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Параметры генерации по умолчанию"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "生成默认值"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "生成預設值"
+          }
+        }
+      }
+    },
+    "settings.generation.subtitle" : {
+      "comment" : "Subtitle explaining that empty generation fields fall back to the server defaults",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Leave empty to use global defaults"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "空欄の場合はグローバルデフォルトが使用されます"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "비워두면 기본값을 사용합니다"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Оставьте пустым, чтобы использовать глобальные настройки по умолчанию."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "留空则使用全局默认值"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "留空則使用全域預設值"
+          }
+        }
+      }
+    },
+    "settings.header.back_to_model" : {
+      "comment" : "Back button label on a per-model settings sub-page",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Back to Model Settings"
+          }
+        }
+      }
+    },
     "settings.header.back_to_models" : {
       "comment" : "Back button label at the top of the per-model settings screen",
       "extractionState" : "manual",
@@ -23514,6 +24192,288 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "返回模型"
+          }
+        }
+      }
+    },
+    "settings.memory.moe_offload.label" : {
+      "comment" : "Row label for the MoE expert offload toggle",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "MoE Expert Offload"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "MoE 专家卸载"
+          }
+        }
+      }
+    },
+    "settings.memory.moe_offload.resident.label" : {
+      "comment" : "Row label for the share of MoE experts kept in memory",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Resident Experts"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "常驻专家"
+          }
+        }
+      }
+    },
+    "settings.memory.moe_offload.resident.range_error" : {
+      "comment" : "Error shown when the MoE resident expert percent is outside 5-95",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Enter a number from 5 to 95."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "请输入 5 到 95 之间的数值。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "請輸入 5 到 95 之間的數值。"
+          }
+        }
+      }
+    },
+    "settings.memory.moe_offload.resident.sub" : {
+      "comment" : "Sublabel for the MoE resident expert share",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Share of expert weights kept in memory (5-95%)."
+          }
+        }
+      }
+    },
+    "settings.memory.moe_offload.speculative" : {
+      "comment" : "Tooltip on MoE expert offload listing the speculative decoders it excludes",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Cannot be combined with Lightning MTP, VLM MTP, or DFlash."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Lightning MTP, VLM MTP, DFlash와 동시에 사용할 수 없습니다."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "不能与 Lightning MTP、VLM MTP 或 DFlash 同时使用。"
+          }
+        }
+      }
+    },
+    "settings.memory.moe_offload.speculative_mtp" : {
+      "comment" : "Tooltip on MoE expert offload for families that keep the MTP head resident",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Can be combined with Lightning MTP: the draft head stays resident while backbone experts stream. Not with VLM MTP or DFlash."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Lightning MTP と併用できます：ドラフトヘッドは常駐し、バックボーンのエキスパートはSSDからストリーム読み込みされます。VLM MTP や DFlash との併用はできません。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Lightning MTP와 함께 사용할 수 있습니다: 드래프트 헤드는 메모리에 상주하고 백본 익스퍼트는 SSD에서 스트리밍됩니다. VLM MTP 또는 DFlash와는 사용할 수 없습니다."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Можно сочетать с Lightning MTP: черновая голова остаётся в памяти, а эксперты основной модели загружаются с SSD. Нельзя сочетать с VLM MTP или DFlash."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "可与 Lightning MTP 同时开启：草稿头常驻，主干专家从 SSD 流式加载。不能与 VLM MTP 或 DFlash 同时使用。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "可與 Lightning MTP 同時開啟：草稿頭常駐，主幹專家從 SSD 串流載入。不能與 VLM MTP 或 DFlash 同時使用。"
+          }
+        }
+      }
+    },
+    "settings.memory.moe_offload.sub" : {
+      "comment" : "Sublabel for the MoE expert offload toggle",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Stream Mixture-of-Experts weights from the checkpoint on demand, keeping only a fraction resident. Fits MoE models larger than memory; costs decode speed. Requires reload."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "按需从检查点流式加载混合专家（MoE）权重，仅保留一小部分常驻。可容纳大于内存的 MoE 模型；代价是解码速度。需要重新加载。"
+          }
+        }
+      }
+    },
+    "settings.memory.section" : {
+      "comment" : "Title of the per-model Memory Saving page and its row",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Memory Saving"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "メモリ節約"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "메모리 절약"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Экономия памяти"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "内存节省"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "記憶體節省"
+          }
+        }
+      }
+    },
+    "settings.memory.ssd_ngram_offload.label" : {
+      "comment" : "Row label for the shared Qwen4 PLE / DeepSeek V4.1 Engram SSD offload toggle",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SSD N-gram Offload"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SSD N-gram オフロード"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SSD N-gram 오프로드"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Выгрузка N-gram на SSD"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SSD N-gram 卸载"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SSD N-gram 卸載"
+          }
+        }
+      }
+    },
+    "settings.memory.ssd_ngram_offload.sub" : {
+      "comment" : "Sublabel for the shared SSD N-gram offload toggle",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Keeps the large N-gram table (Qwen4 PLE or DeepSeek V4.1 Engram) on SSD and reads only the rows it needs. Saves memory, but speed depends on SSD reads. Changing this setting reloads the model."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "大きな N-gram テーブル（Qwen4 PLE または DeepSeek V4.1 Engram）を SSD に置き、必要な行だけを読み込みます。メモリを節約できますが、速度は SSD の読み込み性能に左右されます。この設定を変更するとモデルが再読み込みされます。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "큰 N-gram 테이블(Qwen4 PLE 또는 DeepSeek V4.1 Engram)을 SSD에 두고 필요한 행만 읽습니다. 메모리를 아끼지만 속도는 SSD 읽기 성능에 따라 달라집니다. 이 설정을 바꾸면 모델이 다시 로드됩니다."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Хранит большую таблицу N-gram (Qwen4 PLE или DeepSeek V4.1 Engram) на SSD и читает только нужные строки. Экономит память, но скорость зависит от чтения с SSD. При изменении этой настройки модель перезагружается."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "将大型 N-gram 表（Qwen4 PLE 或 DeepSeek V4.1 Engram）保留在 SSD 上，只读取所需的行。可节省内存，但速度取决于 SSD 读取性能。更改此设置会重新加载模型。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "將大型 N-gram 表（Qwen4 PLE 或 DeepSeek V4.1 Engram）保留在 SSD 上，只讀取需要的列。可節省記憶體，但速度取決於 SSD 讀取效能。變更此設定會重新載入模型。"
           }
         }
       }
@@ -23734,6 +24694,42 @@
         }
       }
     },
+    "settings.moe_offload.conflict.dflash" : {
+      "comment" : "Tooltip / sublabel shown when MoE expert offload can't be enabled because DFlash is on",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Disable DFlash before enabling MoE Expert Offload."
+          }
+        }
+      }
+    },
+    "settings.moe_offload.conflict.mtp" : {
+      "comment" : "Tooltip / sublabel shown when MoE expert offload can't be enabled because Lightning MTP is on",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Disable Lightning MTP before enabling MoE Expert Offload."
+          }
+        }
+      }
+    },
+    "settings.moe_offload.conflict.vlm_mtp" : {
+      "comment" : "Tooltip / sublabel shown when MoE expert offload can't be enabled because VLM MTP is on",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Disable VLM MTP before enabling MoE Expert Offload."
+          }
+        }
+      }
+    },
     "settings.mtp.conflict.dflash" : {
       "comment" : "Tooltip / sublabel shown when MTP can't be enabled because DFlash is on",
       "extractionState" : "manual",
@@ -23754,6 +24750,18 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "启用 MTP 前禁用 DFlash。"
+          }
+        }
+      }
+    },
+    "settings.mtp.conflict.moe_offload" : {
+      "comment" : "Tooltip / sublabel shown when Lightning MTP can't be enabled because MoE expert offload is on",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Disable MoE Expert Offload before enabling Lightning MTP."
           }
         }
       }
@@ -24022,30 +25030,6 @@
         }
       }
     },
-    "settings.section.advanced" : {
-      "comment" : "Segmented control label for the Advanced tab",
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Advanced"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Дополнительно"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "高级"
-          }
-        }
-      }
-    },
     "settings.section.basic" : {
       "comment" : "Segmented control label for the Basic tab",
       "extractionState" : "manual",
@@ -24071,7 +25055,7 @@
       }
     },
     "settings.section.profiles" : {
-      "comment" : "Segmented control label for the Profiles tab",
+      "comment" : "Title of the per-model Profiles page and its row",
       "extractionState" : "manual",
       "localizations" : {
         "en" : {
@@ -24258,6 +25242,102 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "启用此功能前禁用 VLM MTP。"
+          }
+        }
+      }
+    },
+    "settings.summary.ane_prefill" : {
+      "comment" : "Short name of ANE prompt processing in the Experimental row value",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ANE Prefill"
+          }
+        }
+      }
+    },
+    "settings.summary.ced_prefill" : {
+      "comment" : "Short name of DeepSeek V4.1 CED prefill in the Acceleration row value",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "CED Prefill"
+          }
+        }
+      }
+    },
+    "settings.summary.external_engine" : {
+      "comment" : "Page row value for MLX-only pages while an external engine serves the model",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Not used with external engine"
+          }
+        }
+      }
+    },
+    "settings.summary.kwargs" : {
+      "comment" : "Chat-template kwargs in the Advanced row value; placeholder is the entry count",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld kwargs"
+          }
+        }
+      }
+    },
+    "settings.summary.moe_offload" : {
+      "comment" : "MoE expert offload in the Memory Saving row value; placeholder is the resident percent",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "MoE Offload %@%%"
+          }
+        }
+      }
+    },
+    "settings.summary.off" : {
+      "comment" : "Page row value when no feature on that page is enabled",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Off"
+          }
+        }
+      }
+    },
+    "settings.summary.qwen4_wide_decode" : {
+      "comment" : "Short name of Qwen4 extended fused decode in the Acceleration row value",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Extended Fused Decode"
+          }
+        }
+      }
+    },
+    "settings.summary.tool_result_limit" : {
+      "comment" : "Short name of the tool-result token limit in the Advanced row value",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tool Result Limit"
           }
         }
       }
@@ -24719,42 +25799,66 @@
       }
     },
     "settings.k2.thinking_hint" : {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "K2 uses reasoning effort. Use Thinking Budget to limit reasoning."
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "K2 uses reasoning effort. Use Thinking Budget to limit reasoning."
           }
         },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "K2 は推論の強度を使用します。「Thinking Budget」で推論を制限できます。"
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "K2 は推論の強度を使用します。「Thinking Budget」で推論を制限できます。"
           }
         },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "K2는 추론 강도를 사용합니다. Thinking Budget으로 추론을 제한하세요."
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "K2는 추론 강도를 사용합니다. Thinking Budget으로 추론을 제한하세요."
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "K2 использует уровень рассуждения. Используйте «Бюджет thinking», чтобы ограничить рассуждение."
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "K2 использует уровень рассуждения. Используйте «Бюджет thinking», чтобы ограничить рассуждение."
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "K2 使用推理强度。可通过“思考预算”限制推理。"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "K2 使用推理强度。可通过“思考预算”限制推理。"
           }
         },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "K2 使用推理強度。可透過「Thinking Budget」限制推理。"
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "K2 使用推理強度。可透過「Thinking Budget」限制推理。"
+          }
+        }
+      }
+    },
+    "settings.summary.qwen_oq_a8" : {
+      "comment" : "Short name of Qwen INT8 activation prefill in the Acceleration row value",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "INT8 Prefill"
+          }
+        }
+      }
+    },
+    "settings.summary.turboquant" : {
+      "comment" : "TurboQuant KV in the Memory Saving row value; placeholder is the bit width",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "TurboQuant %@-bit"
           }
         }
       }
@@ -24779,6 +25883,18 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "启用 VLM MTP 前禁用 DFlash。"
+          }
+        }
+      }
+    },
+    "settings.vlm_mtp.conflict.moe_offload" : {
+      "comment" : "Tooltip / sublabel shown when VLM MTP can't be enabled because MoE expert offload is on",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Disable MoE Expert Offload before enabling VLM MTP."
           }
         }
       }
@@ -30328,55 +31444,55 @@
       }
     },
     "settings.actions.reset" : {
-      "comment" : "Header button that returns every setting of the model to its default",
+      "comment" : "Menu item that returns every setting of the model to its default",
       "extractionState" : "manual",
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Reset defaults"
+            "value" : "Reset to Defaults…"
           }
         },
         "ko" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "기본값으로 초기화"
+            "value" : "기본값으로 초기화…"
           }
         }
       }
     },
     "settings.actions.optimal" : {
-      "comment" : "Header button that lists the best omlx.ai benchmark settings for this device and model",
+      "comment" : "Menu item that lists the best omlx.ai benchmark settings for this device and model",
       "extractionState" : "manual",
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Apply optimal settings"
+            "value" : "Apply Optimal Settings…"
           }
         },
         "ko" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "최적 설정 적용"
+            "value" : "최적 설정 적용…"
           }
         }
       }
     },
     "settings.actions.recipe" : {
-      "comment" : "Header button that opens the paste-a-recipe sheet",
+      "comment" : "Menu item that opens the paste-a-recipe sheet",
       "extractionState" : "manual",
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Apply custom recipe"
+            "value" : "Apply Custom Recipe…"
           }
         },
         "ko" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "커스텀 레시피 적용"
+            "value" : "커스텀 레시피 적용…"
           }
         }
       }

@@ -391,7 +391,7 @@ def test_oq_a8_toggle_is_gated_to_qwen35_models():
         "<!-- Qwen 3.5/3.6/3.8 oQ INT8-activation prefill kernels -->",
         "<!-- Memory Saving -->",
     )
-    assert 'x-if="isQwenOqA8Model(selectedModel)"' in section
+    assert 'x-if="showsQwenOqA8(selectedModel)"' in section
     assert "modelSettings.qwen35_oq_a8_enabled" in section
     # The detail controls only appear once the feature is on.
     assert 'x-show="modelSettings.qwen35_oq_a8_enabled"' in section

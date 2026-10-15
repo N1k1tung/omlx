@@ -1458,6 +1458,45 @@ class TestChatCompletionEndpoint:
             assert "tools" not in recorded_chat_kwargs[0]
 
 
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    "text,reasoning_tokens",
+    [("<think>Need to reason.</think>Hello!", 3), ("Just an answer.", 0)],
+)
+def test_chat_usage_reports_reasoning_tokens(
+    client, mock_llm_engine, stream, text, reasoning_tokens
+):
+    output = MockGenerationOutput(text=text, new_text=text)
+    payload = {
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "Hello"}],
+    }
+    if stream:
+
+        async def stream_chat(messages, **kwargs):
+            yield output
+
+        mock_llm_engine.stream_chat = stream_chat
+        payload["stream"] = True
+        payload["stream_options"] = {"include_usage": True}
+    else:
+        mock_llm_engine.chat = AsyncMock(return_value=output)
+
+    response = client.post("/v1/chat/completions", json=payload)
+
+    assert response.status_code == 200
+    if stream:
+        events = [
+            json.loads(line[6:])
+            for line in response.text.splitlines()
+            if line.startswith("data: {")
+        ]
+        usage = next(event["usage"] for event in events if event.get("usage"))
+    else:
+        usage = response.json()["usage"]
+    assert usage["completion_tokens_details"]["reasoning_tokens"] == reasoning_tokens
+
+
 class TestAnthropicMessagesEndpoint:
     """Tests for the /v1/messages endpoint (Anthropic format)."""
 
@@ -1958,6 +1997,12 @@ class TestSystemOneEndpoint:
         },
     }
 
+    @pytest.fixture(autouse=True)
+    def _decision_entry(self, mock_engine_pool):
+        mock_engine_pool._entries["test-clef-model"] = SimpleNamespace(
+            engine_type="decision"
+        )
+
     def test_systemone_response_shape(self, client, mock_decision_engine):
         video = "data:video/mp4;base64,AAAA"
         response = client.post(
@@ -2017,12 +2062,17 @@ class TestSystemOneEndpoint:
         assert str(error) in response.text
         assert mock_engine_pool.release_calls == ["test-clef-model"]
 
-    def test_systemone_rejects_non_decision_model(self, client):
+    def test_systemone_with_chat_model(self, client, mock_llm_engine, mock_engine_pool):
+        TestDecisionsEndpoint._letter_chat(mock_llm_engine)
         response = client.post(
             "/v1/systemone", json={**self._BODY, "model": "test-model"}
         )
-        assert response.status_code == 400
-        assert "not a decision model" in response.text
+
+        assert response.status_code == 200
+        answers = response.json()["answers"]
+        assert answers["urgent"] == {"type": "noul", "noul": 0.7311}
+        assert answers["team"]["probabilities"] == {"billing": 0.7311, "tech": 0.2689}
+        assert mock_engine_pool.release_calls == ["test-model"]
 
     @pytest.mark.parametrize(
         "change",
@@ -3080,11 +3130,19 @@ def test_structured_output_keeps_lone_surrogate_escape(client, mock_llm_engine, 
     assert content == model_text
 
 
+@pytest.mark.parametrize("prompt_opened", [False, True])
 @pytest.mark.parametrize("api", ["chat/completions", "messages", "responses"])
-def test_nonstream_thinking_length_channels(client, mock_llm_engine, api):
+def test_nonstream_thinking_length_channels(
+    client, mock_llm_engine, monkeypatch, api, prompt_opened
+):
+    if prompt_opened:
+        monkeypatch.setattr(
+            "omlx.server.prompt_opens_thinking", lambda *args, **kwargs: (True, "")
+        )
     mock_llm_engine.chat = AsyncMock(
         return_value=MockGenerationOutput(
-            text="<think>unfinished", finish_reason="length"
+            text="unfinished" if prompt_opened else "<think>unfinished",
+            finish_reason="length",
         )
     )
     body = {"model": "test-model", "max_tokens": 64}

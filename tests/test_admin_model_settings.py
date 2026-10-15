@@ -431,6 +431,16 @@ def test_oq_a8_model_supported(config_type, expected):
     assert admin_routes._oq_a8_model_supported(config_type) is expected
 
 
+@pytest.mark.parametrize(
+    "config_type,kernels,expected",
+    [("qwen3_5", True, True), ("qwen3_5", False, False), ("llama", True, False)],
+)
+def test_model_options_report_oq_a8_support(config_type, kernels, expected):
+    with patch.object(admin_routes, "_oq_a8_kernels_available", return_value=kernels):
+        options = admin_routes._model_options({"config_model_type": config_type}, None)
+    assert options["qwen35_oq_a8_supported"] is expected
+
+
 @pytest.mark.asyncio
 async def test_oq_a8_needs_native_int8_kernels():
     """Nothing on this hardware would run faster, so the setting is refused

@@ -826,17 +826,29 @@ def _strip_vision_config_if_orphaned(model_dir: Path):
         _nn.Module.load_weights = original_load_weights
 
 
+def _index_declares_sidecar_shard(model_dir: Path, sidecar: Path) -> bool:
+    """True when ``model.safetensors.index.json`` lists the resolved sidecar."""
+    index = model_dir / "model.safetensors.index.json"
+    try:
+        shards = set(json.loads(index.read_text())["weight_map"].values())
+    except Exception:
+        return False
+    return sidecar.relative_to(model_dir.resolve()).as_posix() in shards
+
+
 @contextlib.contextmanager
 def _load_optiq_vision_sidecar_on_load(model_dir: Path):
     """Include a config-declared OptiQ sidecar in mlx-vlm strict loading.
 
-    Pinned mlx-vlm only globs ``*.safetensors`` in the model root, while
-    current OptiQ VLM checkpoints keep their unquantized multimodal weights
-    under ``optiq/``. Root-level legacy sidecars remain a no-op because the
-    native glob already loads them.
+    mlx-vlm loads index-listed shards, or globs the model root without an index.
+    Inject only a subdirectory sidecar that the index does not list.
     """
     sidecar = _resolve_optiq_vision_sidecar(model_dir)
-    if sidecar is None or sidecar.parent == model_dir.resolve():
+    if (
+        sidecar is None
+        or sidecar.parent == model_dir.resolve()
+        or _index_declares_sidecar_shard(model_dir, sidecar)
+    ):
         yield
         return
 
@@ -4857,6 +4869,7 @@ class VLMBatchedEngine(BaseEngine):
             vlm_cache_key_start=vlm_cache_key_start,
             vlm_cache_key_ranges=vlm_cache_key_ranges,
             tools=tools,
+            skip_cache_store=bool(kwargs.get("skip_cache_store", False)),
             preserve_reasoning=bool(kwargs.get("preserve_reasoning", False)),
             **specprefill_kwargs,
         )

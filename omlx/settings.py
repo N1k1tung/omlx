@@ -1555,7 +1555,7 @@ class GlobalSettings:
         self._save_data(data)
 
     def ensure_inference_auth_setting(self) -> None:
-        """Add the manual opt-in default without persisting runtime overrides."""
+        """Add the opt-in default without persisting runtime overrides."""
         path = self.base_path / "settings.json"
         data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
         auth = data.setdefault("auth", {})
