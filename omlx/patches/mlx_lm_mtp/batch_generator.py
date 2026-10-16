@@ -2536,6 +2536,10 @@ class _DepthController:
 
         score(d) = (1 + p1 + p1*p2 + ... ) / t_est(d)
 
+    Each p blends the width's own acceptance curve with the pooled curve by
+    in-request sample count (CURVE_PRIOR_SAMPLES), so a thin, inherited or
+    one-sample estimate cannot outrank a measured rival.
+
     Everything the decision uses is measured on this machine, on this model,
     under the current load — no hand-tuned per-chip or per-model value:
 
@@ -2604,6 +2608,13 @@ class _DepthController:
     # measured slope between depths. 7 ms matches dense backbones (6-10 ms).
     MARGINAL_MS = 7.0
     HYSTERESIS = 1.03  # switch depth only for a >3% score gain
+    # A width curve with this many in-request samples counts as half own,
+    # half pooled prior; below it the estimate shrinks toward the pooled
+    # curve. 12 matches the acceptance EMA's effective memory (1/ALPHA), so
+    # a curve that the EMA itself would still be re-shaping cannot dominate
+    # a score comparison (the measured 32.5k coin flip: W8 beat a one-sample
+    # W6 by 1.7% and froze there, costing 10% against W6's trained value).
+    CURVE_PRIOR_SAMPLES = 12.0
     # Hand-off gate: ``t[0]`` is measured INSIDE the MTP loop, so it carries
     # the loop's synchronous host round-trip that the standard decoder
     # pipelines away. Speculation that cannot beat this taxed baseline by
@@ -2886,9 +2897,20 @@ class _DepthController:
     def _score(self, d: int) -> float:
         expected = 1.0
         run = 1.0
-        p = self.p_by_depth.get(d, self.p)
+        own = self.p_by_depth.get(d)
+        samples = self.curve_samples.get(d, 0) if own is not None else 0
         for j in range(d):
-            run *= self._p_eff(j, p)
+            if own is not None and own[j] is not None:
+                # Shrink a thin curve toward the pooled prior by its
+                # in-request sample count: a one-sample curve must not
+                # outrank a measured rival on equal costs, and an unmeasured
+                # position still reads the pooled estimate.
+                probability = (
+                    samples * own[j] + self.CURVE_PRIOR_SAMPLES * self._p_eff(j, self.p)
+                ) / (samples + self.CURVE_PRIOR_SAMPLES)
+            else:
+                probability = self._p_eff(j, own)
+            run *= probability
             expected += run
         return expected / max(1e-6, self._t_est(d))
 
