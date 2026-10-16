@@ -797,6 +797,19 @@ class _MtpStats:
     mtp_head_ms: float = 0.0  # cumulative time inside MTP-head forwards
     sample_ms: float = 0.0  # cumulative time in sampling + acceptance check
     cache_ops_ms: float = 0.0  # cumulative time in trim / rollback restore
+    # Width-transition telemetry. A noncausal block is a complete proposal
+    # only at the width it was drafted at, so a controller width change
+    # costs a transition cycle: the verify either trims a wider block
+    # (clipped) or runs fewer rows than the freshly selected width (narrow,
+    # a predraft adopted before the controller grew its selection). The
+    # predraft counters split cycles into blocks adopted from the draft that
+    # overlapped the cycle versus re-drafted after the host settled
+    # acceptance.
+    width_changes: int = 0
+    narrow_verifies: int = 0
+    clipped_verifies: int = 0
+    predraft_adopted: int = 0
+    predraft_discarded: int = 0
 
 
 @dataclass
@@ -846,6 +859,8 @@ class _MtpState:
     drafts: Optional[Any] = None
     # Original block depth before verification clips its prefix.
     draft_depth: int | None = None
+    # Verified width of the previous cycle, for the width-change counter.
+    last_verify_width: int = -1
     # Per-draft raw logprob rows (vocab,) — emitted as the accepted drafts'
     # logprobs (PR 990 contract) — and sampler-filtered rows for stochastic
     # acceptance. Lazy arrays; only evaluated if a consumer touches them.
@@ -3805,6 +3820,8 @@ def _log_mtp_stats(uid: Any, stats: "_MtpStats", finish_reason: str) -> None:
       MTP[<uid>] finish=<reason> tokens=<N> cycles=<C> accept=<A>/<C> (<rate>%)
         emits[init=<i>,draft=<d>,bonus=<b>,verify=<v>]
         timing[backbone=<X>ms mtp=<Y>ms sample=<S>ms cache=<C>ms]
+        width[changed=<C>,narrow=<N>,clipped=<K>,predraft=<adopted>/<total>]
+      (the width segment is only logged when any of its counters is nonzero)
     """
     total_emits = (
         stats.init_emits + stats.draft_emits + stats.bonus_emits + stats.verify_emits
@@ -3834,6 +3851,20 @@ def _log_mtp_stats(uid: Any, stats: "_MtpStats", finish_reason: str) -> None:
             f" copy={stats.copy_accepted}/{stats.copy_drafted}"
             f" in {stats.copy_cycles}"
         )
+    width_parts = []
+    if stats.width_changes:
+        width_parts.append(f"changed={stats.width_changes}")
+    if stats.narrow_verifies:
+        width_parts.append(f"narrow={stats.narrow_verifies}")
+    if stats.clipped_verifies:
+        width_parts.append(f"clipped={stats.clipped_verifies}")
+    if stats.predraft_adopted or stats.predraft_discarded:
+        width_parts.append(
+            f"predraft={stats.predraft_adopted}/"
+            f"{stats.predraft_adopted + stats.predraft_discarded}"
+        )
+    if width_parts:
+        depth_str += " width[" + ",".join(width_parts) + "]"
     tpc = total_emits / stats.cycles if stats.cycles else 0.0
     logger.info(
         "MTP[%s] finish=%s tokens=%d cycles=%d tok/cycle=%.2f accept=%d/%d (%s)%s "
@@ -3918,6 +3949,7 @@ def _clip_block_drafts(state: _MtpState, limit: int) -> None:
     drafts = state.drafts
     if drafts is None or limit >= int(drafts.shape[0]):
         return
+    state.stats.clipped_verifies += 1
     state.drafts = drafts[:limit]
     if state.draft_lps:
         state.draft_lps = state.draft_lps[:limit]
@@ -4149,16 +4181,24 @@ def _run_verify_cycle_chain(
     procs = _proc_list(gen_batch)
     is_greedy = _is_greedy(gen_batch)
     drafter = _drafter_for(gen_batch.model)
+    requested = state.controller.cur if state.controller is not None else state.depth
     if drafter is not None and verify_result is None:
         # A shared verify was already built from the drafts it was given.
-        _clip_block_drafts(
-            state,
-            state.controller.cur if state.controller is not None else state.depth,
-        )
+        _clip_block_drafts(state, requested)
     # Adaptive depth: the chain may have drafted fewer than state.depth
     # tokens this cycle — the verify window follows the actual drafts.
     k = int(state.drafts.shape[0])
     draft_depth = state.draft_depth
+    if k:
+        # Width-transition telemetry: how often the verified width moved, and
+        # how often it ran narrower than the controller asked for — a block
+        # drafted before the controller grew its selection. A noncausal
+        # block cannot be extended, so that cycle verifies the stale width.
+        if state.last_verify_width >= 0 and k != state.last_verify_width:
+            state.stats.width_changes += 1
+        state.last_verify_width = k
+        if k < requested:
+            state.stats.narrow_verifies += 1
     copy_cycle = state.copy_drafts
     cycle_t0 = time.perf_counter()
 
@@ -4390,9 +4430,11 @@ def _run_verify_cycle_chain(
         state.copy_drafts = False
         if drafter is not None and predrafted and m == m_gpu:
             drafter.adopt_predraft(state, m + 1)
+            state.stats.predraft_adopted += 1
         elif drafter is not None:
             if predrafted:
                 drafter.discard_predraft()
+                state.stats.predraft_discarded += 1
             rows_hidden = [c[:, : m + 1] for c in captured]
             job = (gen_batch, state, rows_hidden, committed, prev_buf)
             if draft_jobs is None:

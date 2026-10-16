@@ -3662,6 +3662,81 @@ def test_block_drafter_clips_sampled_draft_distributions():
     assert min(width for _, width in _verify_widths(model)) < 6
 
 
+def test_block_drafter_width_transitions_are_counted(monkeypatch):
+    """A full-block drafter changes widths only through verify clips.
+
+    The fake drafter proposes the whole block every cycle, so a controller
+    that shrinks its selection trims the wider block and growing back can
+    never verify narrower than requested: the clip absorbs the transition.
+    """
+    captured = {}
+    original = bg._log_mtp_stats
+
+    def record(uid, stats, finish_reason):
+        captured[uid] = stats
+        return original(uid, stats, finish_reason)
+
+    monkeypatch.setattr(bg, "_log_mtp_stats", record)
+    model = _drafted_counting_model(7, wrong_from=1, adaptive=True)
+    output, _ = generate(model, [[1, 2]], [40])
+    assert output == [3 + i for i in range(40)]
+    stats = captured[0]
+    # The warmup sweep measures every depth, so the verify width moves.
+    assert stats.width_changes > 0
+    assert stats.clipped_verifies > 0
+    assert stats.narrow_verifies == 0
+    assert stats.predraft_adopted == stats.predraft_discarded == 0
+
+
+def test_block_drafter_narrow_verify_counts_a_stale_block(monkeypatch):
+    """Growing the controller over a narrower block verifies the stale width.
+
+    The fake drafter is adapted here: it proposes only the controller's
+    current width, like the batched DFlash drafter. When the controller
+    grows its selection after the block was drafted, the cycle runs fewer
+    rows than requested and the telemetry must say so.
+    """
+    captured = {}
+    original = bg._log_mtp_stats
+
+    def record(uid, stats, finish_reason):
+        captured[uid] = stats
+        return original(uid, stats, finish_reason)
+
+    monkeypatch.setattr(bg, "_log_mtp_stats", record)
+    schedule = iter([3, 7, 3, 3, 3, 3, 3, 3])
+
+    def observe(controller, *args, **kwargs):
+        controller.cur = next(schedule, 3)
+
+    monkeypatch.setattr(bg._DepthController, "observe", observe)
+    model = _drafted_counting_model(7, wrong_from=1, adaptive=True)
+    drafter = model._omlx_drafter
+    original_draft = drafter.draft
+
+    def adapted_draft(jobs):
+        for row_batch, state, hidden, committed, prev_buf in jobs:
+            controller = state.controller
+            width = drafter.depth if controller is None else controller.cur
+            saved, drafter.depth = drafter.depth, max(1, width)
+            try:
+                original_draft([(row_batch, state, hidden, committed, prev_buf)])
+            finally:
+                drafter.depth = saved
+
+    monkeypatch.setattr(drafter, "draft", adapted_draft)
+    output, _ = generate(model, [[1, 2]], [24])
+    assert output == [3 + i for i in range(24)]
+    stats = captured[0]
+    # The draft for the next cycle always predates the controller's new
+    # selection: shrinking trims the wider block (clip), growing verifies
+    # the stale narrower block (narrow) because a noncausal block cannot
+    # be extended in place.
+    assert stats.width_changes > 0
+    assert stats.narrow_verifies >= 1
+    assert stats.clipped_verifies >= 1
+
+
 def _tiny_qwen3(seed=0, layers=6, hidden=32, vocab=64):
     mx.random.seed(seed)
     model = qwen3.Model(
