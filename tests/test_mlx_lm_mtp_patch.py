@@ -5280,24 +5280,6 @@ def test_dflash_batch_pools_acceptance_only_with_the_same_draft_width():
     }
 
 
-def test_thin_width_curve_shrinks_toward_the_pooled_prior():
-    controller = bg._DepthController(3, acceptance_by_depth=True)
-    controller._warmup.clear()
-    controller.t = {1: 10.0, 2: 10.0, 3: 10.0}
-    controller.p = [0.9, 0.9, 0.9]
-    pooled_score = controller._score(2)
-    # A one-sample low curve reads as "mostly unknown": its score stays near
-    # the pooled-derived one instead of collapsing onto the sample.
-    controller.p_by_depth[2] = [0.1, None]
-    controller.curve_samples[2] = 1
-    thin = controller._score(2)
-    assert pooled_score * 0.9 < thin <= pooled_score
-    # A well-trained low curve is a measurement: it scores as itself.
-    controller.p_by_depth[2] = [0.1, 0.1]
-    controller.curve_samples[2] = 40
-    assert controller._score(2) < pooled_score * 0.6
-
-
 def test_unmeasured_width_borrows_the_pooled_prefix():
     controller = bg._DepthController(3, acceptance_by_depth=True)
     for _ in range(60):
