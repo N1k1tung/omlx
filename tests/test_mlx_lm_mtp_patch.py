@@ -5280,6 +5280,26 @@ def test_dflash_batch_pools_acceptance_only_with_the_same_draft_width():
     }
 
 
+def test_margin_probes_rotate_instead_of_shadowing_one_rival():
+    controller = bg._DepthController(4)
+    controller._warmup.clear()
+    controller.p = [0.9, 0.9, 0.9, 0.9]
+    controller.t = {1: 10.0, 2: 10.05, 3: 12.7, 4: 16.2}
+    controller.cur = 2
+    # Widths 3 and 4 both sit within the probe margin; width 1 scores below.
+    # The most recently probed rival yields to the stale one even when it
+    # scores higher, and never-probed rivals go first.
+    controller.last_probed = {3: 100}
+    assert controller._best_rival() == 4
+    controller.last_probed = {3: 5, 4: 2}
+    assert controller._best_rival() == 4
+    controller.last_probed = {3: 2, 4: 5}
+    assert controller._best_rival() == 3
+    # Equal staleness falls back to the higher score.
+    controller.last_probed = {}
+    assert controller._best_rival() == 3
+
+
 def test_unmeasured_width_borrows_the_pooled_prefix():
     controller = bg._DepthController(3, acceptance_by_depth=True)
     for _ in range(60):

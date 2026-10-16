@@ -2655,6 +2655,8 @@ class _DepthController:
         self.cycles = 0
         self.probe_left = 0
         self.exit_streak = 0
+        # Cycle counter at each depth's last probe burst, for rival rotation.
+        self.last_probed: Dict[int, int] = {}
         self._ms_probe = 0.0  # wall-time since any probe burst
         self._cycles_probe = 0  # cycles since any probe burst (clock-free backstop)
         self._ms_explore = 0.0  # wall-time since a staleness-exploration burst
@@ -2804,6 +2806,7 @@ class _DepthController:
                 if target is not None:
                     self.cur = target
                     self.probe_left = self.PROBE_LEN
+                    self.last_probed[target] = self.cycles
                     self._ms_probe = 0.0
                     self._cycles_probe = 0
                     if explore_due:
@@ -2931,19 +2934,27 @@ class _DepthController:
         # i.e. a depth whose (possibly stale) estimate could flip the choice.
         # Bidirectional on purpose: re-measuring a SHALLOWER rival is what
         # breaks the depth-2 lock (a stale-high t[1] hides depth 1's true
-        # advantage and nothing else would ever refresh it).
+        # advantage and nothing else would ever refresh it). Rotation within
+        # the margin set, oldest probe first, keeps a runner-up from being
+        # shadowed: the measured 32.5k request probed only the best-scoring
+        # rival while a one-sample W6 sat one burst away from a 10% better
+        # estimate it would never reach.
         best = self._score(self.cur)
         if best <= 0.0:
             return self._most_stale()
         rival = None
+        rival_age = math.inf
         rival_score = 0.0
         for d in self._probe_candidates():
             if d == self.cur:
                 continue
             s = self._score(d)
-            if s > rival_score:
-                rival, rival_score = d, s
-        if rival is not None and rival_score >= best / self.PROBE_MARGIN:
+            if s < best / self.PROBE_MARGIN:
+                continue
+            age = self.last_probed.get(d, -1)
+            if age < rival_age or (age == rival_age and s > rival_score):
+                rival, rival_age, rival_score = d, age, s
+        if rival is not None:
             return rival
         return None
 
