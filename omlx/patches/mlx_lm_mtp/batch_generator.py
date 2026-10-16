@@ -810,6 +810,11 @@ class _MtpStats:
     clipped_verifies: int = 0
     predraft_adopted: int = 0
     predraft_discarded: int = 0
+    # In-request acceptance-curve samples per width (index = width - 1).
+    # Curve provenance for the breakdown: a zero means the width's score
+    # came from the pooled or seeded curve, not from this request's drafts.
+    # A list (not a dict) so summary merges stay element-wise.
+    width_curve_samples: List[int] = field(default_factory=list)
 
 
 @dataclass
@@ -2640,12 +2645,18 @@ class _DepthController:
             if acceptance_by_depth
             else {}
         )
+        # In-request curve-training observations per width. A width whose
+        # curve has no sample yet is scored from the pooled curve, and the
+        # staleness explorer treats it as maximally stale: an inherited or
+        # pooled-derived curve must not outrank a measurement.
+        self.curve_samples: Dict[int, int] = {d: 0 for d in self.p_by_depth}
         self.t: Dict[int, float] = {}
         self.t_age: Dict[int, float] = {}  # ms since each depth was measured
         self.cycles = 0
         self.probe_left = 0
         self.exit_streak = 0
         self._ms_probe = 0.0  # wall-time since any probe burst
+        self._cycles_probe = 0  # cycles since any probe burst (clock-free backstop)
         self._ms_explore = 0.0  # wall-time since a staleness-exploration burst
         # Measure each depth once (max..1), then the depth-0 plain step
         # three times, before the score gate takes over — t[], including
@@ -2664,8 +2675,15 @@ class _DepthController:
         """Reuse estimates, then remeasure costs in the new request's warmup."""
         for j in range(min(self.max_depth, len(seed.p))):
             self.p[j] = seed.p[j]
-        for d in self.p_by_depth.keys() & seed.p_by_depth.keys():
-            self.p_by_depth[d] = seed.p_by_depth[d][:]
+        # Cost EMAs transfer across requests (same model, chip, context
+        # growth); per-width acceptance curves do not — they describe the
+        # previous request's content, and seeded verbatim they scored the new
+        # request's widths with stale acceptance (measured: identical W3/W5
+        # yields across prompts, and a width holding most of a request on a
+        # curve its own end-of-request estimate contradicted). The pooled
+        # curve above stays seeded: it aggregates every width and trains at
+        # each drafted cycle, so unmeasured widths still score from data.
+        self.curve_samples = {d: 0 for d in self.p_by_depth}
         self.t = {d: v for d, v in seed.t.items() if d <= self.max_depth}
         self.t_age = {d: math.inf for d in self.t}
 
@@ -2682,10 +2700,12 @@ class _DepthController:
         accepted = max(0, min(int(accepted), used))
         # Acceptance: token-domain EMA (a property of model/content, not load).
         a = self.ALPHA
-        p = self.p_by_depth.get(used if draft_depth is None else draft_depth, self.p)
+        curve_key = used if draft_depth is None else draft_depth
+        curve = self.p_by_depth.get(curve_key)
+        p = curve if curve is not None else self.p
         for j in range(used):
             hit = 1.0 if j < accepted else 0.0
-            if p is not self.p and not self._warmup:
+            if curve is not None and not self._warmup:
                 # Width curves refine the pooled one once the warmup sweep
                 # is done; during the sweep each width gets only 1-3
                 # samples, which would shadow the pooled prefix with
@@ -2700,6 +2720,10 @@ class _DepthController:
             self.p[j] = (1.0 - a) * self.p[j] + a * hit
             if j >= accepted:
                 break
+        if curve is not None and not self._warmup and used:
+            # One observation per trained cycle: the staleness explorer
+            # reads this as the width's in-request curve provenance.
+            self.curve_samples[curve_key] += 1
         # Cost: wall-time-domain EMA with a one-off-spike guard, plus per-depth
         # ages so probes can target the estimate that is most stale.
         # ``time_sample=False`` marks cycles carrying a one-off maintenance
@@ -2713,6 +2737,7 @@ class _DepthController:
         if time_sample:
             self.t_age[used] = 0.0
         self._ms_probe += cycle_ms
+        self._cycles_probe += 1
         self._ms_explore += cycle_ms
 
         if self._speculation_losing():
@@ -2730,6 +2755,7 @@ class _DepthController:
                 return
             self.cur = self._best()
             self._ms_probe = 0.0
+            self._cycles_probe = 0
             return
 
         # Finishing a probe burst.
@@ -2738,27 +2764,48 @@ class _DepthController:
             if self.probe_left == 0:
                 self.cur = self._best()
                 self._ms_probe = 0.0
+                self._cycles_probe = 0
             return
 
         # Re-decide every cycle (cheap); HYSTERESIS in _best prevents thrash.
         self.cur = self._best()
 
         # Probe scheduling: bounded-staleness re-measurement in either
-        # direction, at a duty-bounded wall-clock cadence.
+        # direction, at a duty-bounded cadence measured in wall time AND in
+        # cycles: a park/re-entry hands the sequence a fresh controller whose
+        # wall-clock accumulators restart, and short requests can end before
+        # the wall-clock period elapses — the cycle count keeps the probe
+        # duty at ~PROBE_DUTY regardless of which clock lags.
         if self.max_depth > 1:
             period = max(
                 self.PROBE_PERIOD_MS,
                 self.PROBE_LEN * cycle_ms / self.PROBE_DUTY,
             )
-            if self._ms_probe >= period:
+            if (
+                self._ms_probe >= period
+                or self._cycles_probe >= self.PROBE_LEN / self.PROBE_DUTY
+            ):
                 explore_due = self._ms_explore >= max(
                     self.PROBE_PERIOD_MAX_MS, 2.0 * period
                 )
                 target = self._most_stale() if explore_due else self._best_rival()
+                if (
+                    target is None
+                    and not explore_due
+                    and any(not count for count in self.curve_samples.values())
+                ):
+                    # Every in-margin rival was probed recently enough that
+                    # none is eligible, yet some width has still never
+                    # trained its curve in this request: its pooled-derived
+                    # score is the least trustworthy number in the comparison
+                    # (the observed width lock-in), so measure it at probe
+                    # cadence instead of waiting out the exploration floor.
+                    target = self._most_stale()
                 if target is not None:
                     self.cur = target
                     self.probe_left = self.PROBE_LEN
                     self._ms_probe = 0.0
+                    self._cycles_probe = 0
                     if explore_due:
                         self._ms_explore = 0.0
 
@@ -2903,12 +2950,24 @@ class _DepthController:
     def _most_stale(self) -> Optional[int]:
         # The depth whose cost estimate has gone longest unmeasured (never
         # measured counts as infinitely stale). Keeps every t[d] fresh enough
-        # that fresh-vs-stale comparison bias stays bounded.
+        # that fresh-vs-stale comparison bias stays bounded. A width whose
+        # acceptance curve has no in-request sample outranks any cost age:
+        # its curve is pooled- or inherited-derived, and a stale curve bends
+        # the score comparison more than a stale cost EMA. The warmup walk
+        # leaves every width untrained, so this only reorders targets after
+        # the sweep, when some widths have trained and others have not.
         cand = None
         worst = -1.0
-        for d in self._probe_candidates():
-            if d == self.cur:
-                continue
+        untrained = [
+            d
+            for d in self._probe_candidates()
+            # Depth 0 has no curve by design; it competes on cost age only.
+            if d != self.cur
+            and d in self.p_by_depth
+            and not self.curve_samples.get(d)
+        ]
+        pool = untrained or [d for d in self._probe_candidates() if d != self.cur]
+        for d in pool:
             age = self.t_age.get(d)
             age = float("inf") if age is None else age
             if age > worst:
@@ -3821,6 +3880,7 @@ def _log_mtp_stats(uid: Any, stats: "_MtpStats", finish_reason: str) -> None:
         emits[init=<i>,draft=<d>,bonus=<b>,verify=<v>]
         timing[backbone=<X>ms mtp=<Y>ms sample=<S>ms cache=<C>ms]
         width[changed=<C>,narrow=<N>,clipped=<K>,predraft=<adopted>/<total>]
+          curves=<in-request acceptance-curve samples per width>
       (the width segment is only logged when any of its counters is nonzero)
     """
     total_emits = (
@@ -3862,6 +3922,10 @@ def _log_mtp_stats(uid: Any, stats: "_MtpStats", finish_reason: str) -> None:
         width_parts.append(
             f"predraft={stats.predraft_adopted}/"
             f"{stats.predraft_adopted + stats.predraft_discarded}"
+        )
+    if any(stats.width_curve_samples):
+        width_parts.append(
+            "curves=" + ",".join(str(count) for count in stats.width_curve_samples)
         )
     if width_parts:
         depth_str += " width[" + ",".join(width_parts) + "]"
@@ -4525,6 +4589,16 @@ def _run_verify_cycle_chain(
                     else {}
                 ),
             )
+            curve_samples = getattr(state.controller, "curve_samples", None)
+            if curve_samples:
+                # Mirror the controller's curve provenance into the stats so
+                # any finish path dumps it; widths beyond max_depth cannot
+                # occur, so the list is indexed by width - 1.
+                mirrored = state.stats.width_curve_samples
+                del mirrored[len(curve_samples) :]
+                mirrored.extend(0 for _ in range(len(mirrored), len(curve_samples)))
+                for width, count in curve_samples.items():
+                    mirrored[width - 1] = count
             _maybe_finish_mtp_reentry_probe(
                 gen_batch,
                 state,

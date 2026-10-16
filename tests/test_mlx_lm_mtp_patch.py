@@ -3686,6 +3686,9 @@ def test_block_drafter_width_transitions_are_counted(monkeypatch):
     assert stats.clipped_verifies > 0
     assert stats.narrow_verifies == 0
     assert stats.predraft_adopted == stats.predraft_discarded == 0
+    # Post-walk cycles leave curve provenance in the stats: the endpoint
+    # dump can tell trained widths from pooled- or seeded-scored ones.
+    assert any(stats.width_curve_samples)
 
 
 def test_block_drafter_narrow_verify_counts_a_stale_block(monkeypatch):
@@ -5221,16 +5224,41 @@ def test_noncausal_acceptance_is_scored_per_draft_width(batched, independent):
         assert score(1) == narrow
 
 
-def test_dflash_acceptance_seed_is_copied_per_width():
+def test_dflash_seed_keeps_costs_but_not_width_curves():
     seed = bg._DepthController(3, acceptance_by_depth=True)
     seed._warmup.clear()  # past the sweep, or width curves would not train
     seed.observe(2, 2, 10)
     seed.observe(3, 3, 10)
     child = bg._DepthController(2, seed=seed, acceptance_by_depth=True)
     child._warmup.clear()
-    assert child.p_by_depth == {d: seed.p_by_depth[d] for d in (1, 2)}
+    # Cost EMAs transfer across requests; per-width acceptance curves do not
+    # (they describe the previous request's content). The child scores
+    # unmeasured widths from the seeded pooled curve until they train.
+    assert child.p == seed.p[:2]
+    assert child.p_by_depth == {1: [None], 2: [None, None]}
+    assert child.curve_samples == {1: 0, 2: 0}
+    assert child.t == {d: t for d, t in seed.t.items() if d <= 2}
+    assert all(age == float("inf") for age in child.t_age.values())
     child.observe(2, 0, 10)
-    assert child.p_by_depth[2] != seed.p_by_depth[2]
+    assert child.curve_samples == {1: 0, 2: 1}
+
+
+def test_staleness_explorer_prefers_an_untrained_width():
+    controller = bg._DepthController(3, acceptance_by_depth=True)
+    controller._warmup.clear()
+    controller.observe(3, 3, 10)  # width 3 trains its curve in-request
+    controller.t_age = {1: 500.0, 2: 1000.0, 3: 2000.0}
+    controller.cur = 3
+    # Width 2 has no in-request curve sample, so the explorer takes it
+    # over the more cost-stale width 3: a stale curve bends the score
+    # comparison more than a stale cost EMA.
+    assert controller._most_stale() == 2
+    controller.observe(2, 2, 10)
+    controller.observe(1, 1, 10)
+    # Every non-cur width is trained now: pure cost-age ordering returns.
+    controller.cur = 3
+    controller.t_age = {1: 100.0, 2: 900.0, 3: 400.0}
+    assert controller._most_stale() == 2
 
 
 def test_dflash_batch_pools_acceptance_only_with_the_same_draft_width():
