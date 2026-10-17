@@ -2554,12 +2554,17 @@ class _DepthController:
       whose t was measured during the slow post-prefill cycles looks expensive
       forever, so the controller locks into its rival (measured as a depth-2
       lock costing prose ~2-4%). Probes are therefore BIDIRECTIONAL and
-      staleness-directed: on a wall-clock cadence, re-run the best rival depth
-      (shallower or deeper) when its score is within ``PROBE_MARGIN`` of the
-      current choice, and periodically the most-stale depth, so every t[d] has
-      bounded age. On heavy models a fixed wall-clock cadence would spend a
-      large share of cycles probing, so probing is duty-bounded to
-      ~``PROBE_DUTY`` of cycles — a scale-free ratio, not a per-model tuning.
+      staleness-directed: on a duty-bounded cycle cadence, re-run the best
+      rival depth (shallower or deeper) when its score is within
+      ``PROBE_MARGIN`` of the current choice, and periodically — every
+      ~``PROBE_PERIOD_MAX_MS`` worth of average-cycle compute — the
+      most-stale depth, so every t[d] has bounded age. A burst every
+      ``PROBE_LEN/PROBE_DUTY`` cycles keeps probing under ~``PROBE_DUTY`` of
+      cycles on heavy models exactly as on light ones (a scale-free ratio,
+      not a per-model tuning) and keeps the trajectory deterministic; the
+      retired wall-clock arm raced the cycle counter and timing jitter
+      flipped that race, reshuffling whole trajectories across runs of
+      identical code.
 
     Depth 0 — the escape hatch: speculation is only profitable while the
     multi-token verify forward is cheap relative to a plain decode step.
@@ -2593,8 +2598,7 @@ class _DepthController:
 
     ALPHA = 0.08  # acceptance EMA weight (token domain, content-driven)
     TAU_MS = 400.0  # cost EMA horizon in wall-clock ms (load/thermal/context)
-    PROBE_PERIOD_MS = 1000.0  # min wall-time between probes (light models)
-    PROBE_PERIOD_MAX_MS = 5000.0  # staleness-exploration cadence floor
+    PROBE_PERIOD_MAX_MS = 5000.0  # staleness-exploration floor, avg-cycle-cost ms
     PROBE_LEN = 4
     PROBE_DUTY = 0.15  # probes never consume more than ~this share of cycles
     PROBE_MARGIN = 1.15  # a rival within this score ratio is worth re-measuring
@@ -2658,9 +2662,8 @@ class _DepthController:
         self.exit_streak = 0
         # Cycle counter at each depth's last probe burst, for rival rotation.
         self.last_probed: Dict[int, int] = {}
-        self._ms_probe = 0.0  # wall-time since any probe burst
-        self._cycles_probe = 0  # cycles since any probe burst (clock-free backstop)
-        self._ms_explore = 0.0  # wall-time since a staleness-exploration burst
+        self._cycles_probe = 0  # cycles since any probe burst
+        self._cycles_explore = 0  # cycles since a staleness-exploration burst
         # Optional per-cycle decision trace for offline trajectory analysis.
         # Rows are (cycle, cur, probe_left, used, accepted, draft_depth,
         # cycle_ms); the env flag keeps production append-free.
@@ -2756,9 +2759,8 @@ class _DepthController:
             self.t_age[d] += cycle_ms
         if time_sample:
             self.t_age[used] = 0.0
-        self._ms_probe += cycle_ms
         self._cycles_probe += 1
-        self._ms_explore += cycle_ms
+        self._cycles_explore += 1
         if self.trace is not None:
             # Entry-state snapshot, before this cycle's re-decision: cur is
             # the width the cycle ran at and probe_left the burst budget
@@ -2784,7 +2786,6 @@ class _DepthController:
                 self.cur = self._warmup[0]
                 return
             self.cur = self._best()
-            self._ms_probe = 0.0
             self._cycles_probe = 0
             return
 
@@ -2793,7 +2794,6 @@ class _DepthController:
             self.probe_left -= 1
             if self.probe_left == 0:
                 self.cur = self._best()
-                self._ms_probe = 0.0
                 self._cycles_probe = 0
             return
 
@@ -2808,22 +2808,17 @@ class _DepthController:
         self.cur = self._best()
 
         # Probe scheduling: bounded-staleness re-measurement in either
-        # direction, at a duty-bounded cadence measured in wall time AND in
-        # cycles: a park/re-entry hands the sequence a fresh controller whose
-        # wall-clock accumulators restart, and short requests can end before
-        # the wall-clock period elapses — the cycle count keeps the probe
-        # duty at ~PROBE_DUTY regardless of which clock lags.
+        # direction, at a duty-bounded cadence measured in cycles only. The
+        # retired wall-clock arm raced the cycle counter and timing jitter
+        # flipped that race, reshuffling whole trajectories across runs of
+        # identical code (measured: 99.7 vs 109.2 tok/s at 32.5k tokens);
+        # the cycle arm alone already held the duty at ~PROBE_DUTY in steady
+        # state at every cycle cost, and a park/re-entry still restarts the
+        # counters with the fresh controller.
         if self.max_depth > 1:
-            period = max(
-                self.PROBE_PERIOD_MS,
-                self.PROBE_LEN * cycle_ms / self.PROBE_DUTY,
-            )
-            if (
-                self._ms_probe >= period
-                or self._cycles_probe >= self.PROBE_LEN / self.PROBE_DUTY
-            ):
-                explore_due = self._ms_explore >= max(
-                    self.PROBE_PERIOD_MAX_MS, 2.0 * period
+            if self._cycles_probe >= self.PROBE_LEN / self.PROBE_DUTY:
+                explore_due = self._cycles_explore >= (
+                    self.PROBE_PERIOD_MAX_MS / self._avg_cycle_ms()
                 )
                 target = self._most_stale() if explore_due else self._best_rival()
                 if (
@@ -2842,10 +2837,9 @@ class _DepthController:
                     self.cur = target
                     self.probe_left = self.PROBE_LEN
                     self.last_probed[target] = self.cycles
-                    self._ms_probe = 0.0
                     self._cycles_probe = 0
                     if explore_due:
-                        self._ms_explore = 0.0
+                        self._cycles_explore = 0
 
     def _time_alpha(self, cycle_ms: float) -> float:
         # EMA weight for a cycle of this wall-time: the memory horizon is
@@ -2992,6 +2986,14 @@ class _DepthController:
         if rival is not None:
             return rival
         return None
+
+    def _avg_cycle_ms(self) -> float:
+        # Mean measured cycle cost across widths (the depth-0 baseline
+        # included): converts the exploration wall-time floor into a
+        # deterministic cycle count, so exploration cadence tracks the same
+        # amount of compute rather than a jittery clock race.
+        avg = sum(self.t.values()) / len(self.t) if self.t else 0.0
+        return avg if avg > 0.0 else 1.0
 
     def _most_stale(self) -> Optional[int]:
         # The depth whose cost estimate has gone longest unmeasured (never

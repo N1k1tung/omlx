@@ -172,28 +172,30 @@ def test_stale_lock_is_broken_by_repeated_probes():
     assert c._best() == 1  # lock broken
 
 
-def test_probe_duty_bound_scales_period_on_heavy_models():
-    # On a 100ms-cycle model, a 1s cadence would spend ~40% of cycles probing
-    # (4-cycle burst every 10 cycles). The duty bound stretches the period so
-    # probes stay under ~PROBE_DUTY of cycles.
+def test_probe_duty_is_cycle_bounded_on_heavy_models():
+    # The probe trigger is a pure cycle count: a 4-cycle burst every
+    # PROBE_LEN/PROBE_DUTY cycles keeps the probe duty at ~PROBE_DUTY on a
+    # 100ms-cycle model exactly as on a light one, and the cadence is
+    # deterministic (the retired wall-clock arm raced the cycle counter and
+    # timing jitter flipped that race).
     c = _DepthController(2)
     c._warmup = []
     c.cur = 1
     c.p = [0.8, 0.25]  # rival within PROBE_MARGIN but below HYSTERESIS
     c.t = {1: 100.0, 2: 110.0}
     c.t_age = {1: 0.0, 2: 0.0}
-    c._ms_probe = c.PROBE_PERIOD_MS + 1.0  # past the light-model cadence...
+    c._cycles_probe = int(c.PROBE_LEN / c.PROBE_DUTY) - 1  # one cycle short...
     c.observe(1, 1, 100.0)
-    assert c.probe_left == 0  # ...but under the duty-bounded period: no probe
+    assert c.probe_left == 0  # ...of the cadence: no probe
     assert c.cur == 1
-    # Past the duty-bounded period the rival probe fires.
-    c._ms_probe = c.PROBE_LEN * 100.0 / c.PROBE_DUTY + 1.0
+    # Crossing PROBE_LEN/PROBE_DUTY cycles fires the rival probe.
+    c._cycles_probe = int(c.PROBE_LEN / c.PROBE_DUTY)
     c.observe(1, 1, 100.0)
     assert c.probe_left == c.PROBE_LEN
     assert c.cur == 2
 
 
-def test_uncertain_rival_gets_probed_after_wall_clock_period():
+def test_uncertain_rival_gets_probed_after_cycle_period():
     c = _DepthController(2)
     c._warmup = []
     c.probe_left = 0
@@ -201,18 +203,18 @@ def test_uncertain_rival_gets_probed_after_wall_clock_period():
     c.t = {1: 10.0, 2: 13.0}
     c.t_age = {1: 0.0, 2: 0.0}
     c.cur = 1
-    c._ms_probe = c.PROBE_PERIOD_MS - 100.0
-    c.observe(1, 1, 10.0)  # under the period -> no probe yet
+    c._cycles_probe = 20
+    c.observe(1, 1, 10.0)  # under the cadence -> no probe yet
     assert c.probe_left == 0
     assert c.cur == 1
-    c._ms_probe = c.PROBE_PERIOD_MS - 5.0
-    c.observe(1, 1, 10.0)  # crosses the period while rival is close -> probe
+    c._cycles_probe = int(c.PROBE_LEN / c.PROBE_DUTY)
+    c.observe(1, 1, 10.0)  # crosses the cadence while rival is close -> probe
     assert c.probe_left == c.PROBE_LEN
     assert c.cur == 2
 
 
 def test_exploration_probe_targets_most_stale_depth():
-    # When the exploration clock lapses, the probe goes to the most-stale
+    # When the exploration cadence lapses, the probe goes to the most-stale
     # depth even if it is not a close rival (bounded staleness for all depths).
     c = _DepthController(3)
     c._warmup = []
@@ -222,8 +224,8 @@ def test_exploration_probe_targets_most_stale_depth():
     c.t = {0: 7.0, 1: 10.0, 2: 30.0, 3: 50.0}  # baseline measured, not stale
     c.t_age = {0: 50.0, 1: 0.0, 2: 100.0, 3: 9000.0}
     assert c._best_rival() is None  # no close rival
-    c._ms_probe = c.PROBE_PERIOD_MS + 1.0
-    c._ms_explore = c.PROBE_PERIOD_MAX_MS + 1.0
+    c._cycles_probe = int(c.PROBE_LEN / c.PROBE_DUTY)
+    c._cycles_explore = int(c.PROBE_PERIOD_MAX_MS / c._avg_cycle_ms())
     c.observe(1, 1, 10.0)
     assert c.probe_left == c.PROBE_LEN
     assert c.cur == 3  # the never/least-recently measured depth
@@ -239,7 +241,7 @@ def test_probe_burst_completes_and_resets_cadence():
     for _ in range(c.PROBE_LEN):
         c.observe(2, 1, 11.5)
     assert c.probe_left == 0
-    assert c._ms_probe == 0.0
+    assert c._cycles_probe == 0
 
 
 def test_expensive_extra_verify_settles_at_depth_1_end_to_end():
