@@ -5355,7 +5355,11 @@ def test_pinned_width_holds_the_selection_and_skips_warmup(monkeypatch):
     assert bg._mtp_depth_seed(_Model()) is None
     # Widths outside 1..max_depth clamp into range; garbage disables pinning.
     monkeypatch.setenv('OMLX_MTP_FIXED_WIDTH', '99')
-    assert bg._DepthController(8).cur == 7
+    assert bg._DepthController(8).cur == 8
+    # Engine geometry: block_max 8 builds max_depth 7, so pinning the top
+    # width must land on cur == max_depth (measured W8 == W7 before this).
+    monkeypatch.setenv('OMLX_MTP_FIXED_WIDTH', '8')
+    assert bg._DepthController(7).cur == 7
     monkeypatch.setenv('OMLX_MTP_FIXED_WIDTH', 'garbage')
     controller = bg._DepthController(8)
     assert controller.pinned is None and controller.cur == 8

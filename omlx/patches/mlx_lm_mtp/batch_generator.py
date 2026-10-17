@@ -2671,7 +2671,7 @@ class _DepthController:
         # keeps drafting normally; only the controller's selection is pinned.
         pin = os.environ.get('OMLX_MTP_FIXED_WIDTH', '')
         self.pinned = (
-            min(self.max_depth, max(1, int(pin))) - 1 if pin.isdigit() else None
+            min(self.max_depth, max(1, int(pin) - 1)) if pin.isdigit() else None
         )
         # Measure each depth once (max..1), then the depth-0 plain step
         # three times, before the score gate takes over — t[], including
