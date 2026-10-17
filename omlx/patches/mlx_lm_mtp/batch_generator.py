@@ -2665,6 +2665,14 @@ class _DepthController:
         # Rows are (cycle, cur, probe_left, used, accepted, draft_depth,
         # cycle_ms); the env flag keeps production append-free.
         self.trace = [] if os.environ.get('OMLX_MTP_CYCLE_TRACE') else None
+        # OMLX_MTP_FIXED_WIDTH=<width> holds one width for ground-truth
+        # fixed-width requests: no warmup sweep, no probes, no re-decisions,
+        # and no inherited seed (see _mtp_depth_seed). The adaptive drafter
+        # keeps drafting normally; only the controller's selection is pinned.
+        pin = os.environ.get('OMLX_MTP_FIXED_WIDTH', '')
+        self.pinned = (
+            min(self.max_depth, max(1, int(pin))) - 1 if pin.isdigit() else None
+        )
         # Measure each depth once (max..1), then the depth-0 plain step
         # three times, before the score gate takes over — t[], including
         # the baseline the exit decision compares against, is data-driven
@@ -2675,6 +2683,11 @@ class _DepthController:
         self._warmup: List[int] = list(range(self.max_depth, 0, -1))
         if self.max_depth > 1:
             self._warmup.extend([0, 0, 0])
+        if self.pinned is not None:
+            # The sweep would run the wrong widths; the pinned width is
+            # measured by the pinned cycles themselves.
+            self.cur = self.pinned
+            self._warmup = []
         if seed is not None and seed.t:
             self._adopt(seed)
 
@@ -2785,6 +2798,13 @@ class _DepthController:
             return
 
         # Re-decide every cycle (cheap); HYSTERESIS in _best prevents thrash.
+        if self.pinned is not None:
+            # Ground-truth mode: hold the width, skip re-decisions and
+            # probes. probe_left never becomes nonzero because the
+            # scheduling below is skipped too.
+            self.cur = self.pinned
+            return
+
         self.cur = self._best()
 
         # Probe scheduling: bounded-staleness re-measurement in either
@@ -3316,11 +3336,14 @@ def _chain_next_drafts(
 def _mtp_depth_seed(model: Any) -> Optional[Any]:
     # Inherited per-request estimates (acceptance curves + cost EMAs) are a
     # trajectory-divergence suspect; OMLX_MTP_FRESH_CONTROLLER=1 starts every
-    # request from a cold controller for the inheritance A/B. Machine-level
-    # constants (marginal_ms, measured loop tax) still seed via their own
-    # constructor args on purpose: they describe the hardware, not the
-    # previous request's content.
-    if os.environ.get('OMLX_MTP_FRESH_CONTROLLER'):
+    # request from a cold controller for the inheritance A/B, and a pinned
+    # width (OMLX_MTP_FIXED_WIDTH) measures ground truth, so both start
+    # cold. Machine-level constants (marginal_ms, measured loop tax) still
+    # seed via their own constructor args on purpose: they describe the
+    # hardware, not the previous request's content.
+    if os.environ.get('OMLX_MTP_FRESH_CONTROLLER') or os.environ.get(
+        'OMLX_MTP_FIXED_WIDTH'
+    ):
         return None
     return getattr(model, '_omlx_mtp_depth_seed', None)
 

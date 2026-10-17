@@ -5333,6 +5333,34 @@ def test_fresh_controller_flag_drops_the_inherited_seed(monkeypatch):
     assert bg._mtp_depth_seed(model) is None
 
 
+def test_pinned_width_holds_the_selection_and_skips_warmup(monkeypatch):
+    monkeypatch.setenv('OMLX_MTP_FIXED_WIDTH', '4')
+    controller = bg._DepthController(8)
+    # No warmup sweep: the first cycle already runs at the pinned width.
+    assert controller.cur == 3
+    assert controller._warmup == []
+    for _ in range(30):
+        controller.observe(3, 2, 30.0)
+    # No re-decisions, no probes, no park: t[pinned] is the only measured
+    # cost, and the cold start (see _mtp_depth_seed) keeps repetitions
+    # identical.
+    assert controller.cur == 3
+    assert controller.probe_left == 0
+    assert set(controller.t) == {3}
+    assert not controller.should_exit()
+
+    class _Model:
+        _omlx_mtp_depth_seed = 'seed'
+
+    assert bg._mtp_depth_seed(_Model()) is None
+    # Widths outside 1..max_depth clamp into range; garbage disables pinning.
+    monkeypatch.setenv('OMLX_MTP_FIXED_WIDTH', '99')
+    assert bg._DepthController(8).cur == 7
+    monkeypatch.setenv('OMLX_MTP_FIXED_WIDTH', 'garbage')
+    controller = bg._DepthController(8)
+    assert controller.pinned is None and controller.cur == 8
+
+
 def test_unmeasured_width_borrows_the_pooled_prefix():
     controller = bg._DepthController(3, acceptance_by_depth=True)
     for _ in range(60):
