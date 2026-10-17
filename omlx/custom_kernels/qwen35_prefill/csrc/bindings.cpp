@@ -11,6 +11,10 @@
 namespace nb = nanobind;
 using namespace nb::literals;
 
+namespace omlx::moe_staging {
+void register_bindings(nb::module_& m);
+}
+
 NB_MODULE(_ext, m) {
   m.doc() = "Native Qwen3.5/3.6 prefill kernels for oMLX";
 
@@ -29,6 +33,8 @@ NB_MODULE(_ext, m) {
   m.def(
       "is_nax_available",
       &omlx::qwen35_prefill_kernels::is_nax_available);
+
+  omlx::moe_staging::register_bindings(m);
 
   m.def(
       "set_command_buffer_caps",

@@ -920,6 +920,22 @@ def _install_muse_qmm_spy(monkeypatch):
     return calls
 
 
+def test_muse_glimmer_q4_patch_leaves_module_to_vendored_load(monkeypatch):
+    from omlx.patches import mlx_vlm_muse_glimmer_compat as muse_compat
+    from omlx.patches import qwen35_q4_mlp as q4patch
+
+    # Other VLMs start before any Muse load; upstream muse_glimmer must not
+    # be cached ahead of the vendored module.
+    monkeypatch.setattr(muse_compat, "_APPLIED", False)
+    monkeypatch.setattr(q4patch, "_MUSE_PATCHED", False)
+    monkeypatch.setattr(q4patch, "_has_native_qmm", lambda: True)
+    for name in [m for m in sys.modules if m.startswith("mlx_vlm.models.muse_glimmer")]:
+        monkeypatch.delitem(sys.modules, name)
+
+    assert q4patch.apply_muse_glimmer_q4_prefill_patch() is False
+    assert "mlx_vlm.models.muse_glimmer" not in sys.modules
+
+
 def test_muse_glimmer_q4_mlp_patch_matches_bf16_reference(monkeypatch):
     _muse_applied()
     from mlx_vlm.models.muse_glimmer.language import MLP

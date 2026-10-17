@@ -20,6 +20,7 @@ from mlx_lm.models.activations import swiglu
 
 from omlx.custom_kernels.nax import is_nax_available
 
+from .mlx_vlm_muse_glimmer_compat import is_applied as muse_glimmer_compat_applied
 from .qwen35_packed_linear import PackedLinear
 
 logger = logging.getLogger(__name__)
@@ -872,6 +873,10 @@ def apply_muse_glimmer_q4_prefill_patch() -> bool:
     global _MUSE_PATCHED
     if _MUSE_PATCHED:
         return True
+    # Importing the module first would cache upstream muse_glimmer and hide
+    # the vendored one from a later Muse load.
+    if not muse_glimmer_compat_applied():
+        return False
     if not _has_native_qmm():
         logger.debug("Muse native qmm unavailable; patch skipped")
         return False
