@@ -17,6 +17,7 @@ import functools
 import inspect
 import logging
 import math
+import os
 import time
 import weakref
 from collections import deque
@@ -2660,6 +2661,10 @@ class _DepthController:
         self._ms_probe = 0.0  # wall-time since any probe burst
         self._cycles_probe = 0  # cycles since any probe burst (clock-free backstop)
         self._ms_explore = 0.0  # wall-time since a staleness-exploration burst
+        # Optional per-cycle decision trace for offline trajectory analysis.
+        # Rows are (cycle, cur, probe_left, used, accepted, draft_depth,
+        # cycle_ms); the env flag keeps production append-free.
+        self.trace = [] if os.environ.get('OMLX_MTP_CYCLE_TRACE') else None
         # Measure each depth once (max..1), then the depth-0 plain step
         # three times, before the score gate takes over — t[], including
         # the baseline the exit decision compares against, is data-driven
@@ -2741,6 +2746,16 @@ class _DepthController:
         self._ms_probe += cycle_ms
         self._cycles_probe += 1
         self._ms_explore += cycle_ms
+        if self.trace is not None:
+            # Entry-state snapshot, before this cycle's re-decision: cur is
+            # the width the cycle ran at and probe_left the burst budget
+            # still pending at entry; the choice taken for the NEXT cycle
+            # appears in the following row (or in the end-of-request
+            # controller snapshot the profiler reads).
+            self.trace.append((
+                self.cycles, self.cur, self.probe_left,
+                used, accepted, draft_depth, round(cycle_ms, 3),
+            ))
 
         if self._speculation_losing():
             self.exit_streak += 1
@@ -3298,6 +3313,18 @@ def _chain_next_drafts(
 # ---------------------------------------------------------------------------
 
 
+def _mtp_depth_seed(model: Any) -> Optional[Any]:
+    # Inherited per-request estimates (acceptance curves + cost EMAs) are a
+    # trajectory-divergence suspect; OMLX_MTP_FRESH_CONTROLLER=1 starts every
+    # request from a cold controller for the inheritance A/B. Machine-level
+    # constants (marginal_ms, measured loop tax) still seed via their own
+    # constructor args on purpose: they describe the hardware, not the
+    # previous request's content.
+    if os.environ.get('OMLX_MTP_FRESH_CONTROLLER'):
+        return None
+    return getattr(model, '_omlx_mtp_depth_seed', None)
+
+
 def _post_init_mtp(gen_batch: Any, *, verify_result=None, priming_offset=None) -> None:
     """Bridge from standard ``__init__``'s ``_step()`` into PR 990's cycle 1.
 
@@ -3381,7 +3408,7 @@ def _post_init_mtp(gen_batch: Any, *, verify_result=None, priming_offset=None) -
                     depth,
                     marginal_ms=getattr(gen_batch.model, "_omlx_mtp_marginal_ms", None),
                     exit_margin=_effective_loop_tax(gen_batch.model),
-                    seed=getattr(gen_batch.model, "_omlx_mtp_depth_seed", None),
+                    seed=_mtp_depth_seed(gen_batch.model),
                     acceptance_by_depth=(
                         drafter is not None and not getattr(drafter, "causal", False)
                     ),

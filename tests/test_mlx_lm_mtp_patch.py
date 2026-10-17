@@ -5300,6 +5300,39 @@ def test_margin_probes_rotate_instead_of_shadowing_one_rival():
     assert controller._best_rival() == 3
 
 
+def test_cycle_trace_is_env_gated_and_records_entry_state(monkeypatch):
+    monkeypatch.delenv('OMLX_MTP_CYCLE_TRACE', raising=False)
+    controller = bg._DepthController(4)
+    controller.observe(4, 3, 40.0)
+    assert controller.trace is None
+
+    monkeypatch.setenv('OMLX_MTP_CYCLE_TRACE', '1')
+    controller = bg._DepthController(4)
+    controller.observe(4, 3, 40.0)
+    # Row = (cycle, cur, probe_left, used, accepted, draft_depth, cycle_ms).
+    # cur/probe_left are the ENTRY state — the width this cycle ran at and
+    # the burst budget still pending — not the decision observe() then
+    # takes for the next cycle.
+    assert controller.trace == [(1, 4, 0, 4, 3, None, 40.0)]
+    controller.observe(2, 1, 25.5, draft_depth=2)
+    assert controller.trace[-1][0] == 2
+    assert controller.trace[-1][3:7] == (2, 1, 2, 25.5)
+
+
+def test_fresh_controller_flag_drops_the_inherited_seed(monkeypatch):
+    class _Model:
+        pass
+
+    model = _Model()
+    model._omlx_mtp_depth_seed = 'seed'
+    monkeypatch.delenv('OMLX_MTP_FRESH_CONTROLLER', raising=False)
+    assert bg._mtp_depth_seed(model) == 'seed'
+    # A cold start drops the previous request's acceptance curves and cost
+    # EMAs entirely; machine constants still flow through their own args.
+    monkeypatch.setenv('OMLX_MTP_FRESH_CONTROLLER', '1')
+    assert bg._mtp_depth_seed(model) is None
+
+
 def test_unmeasured_width_borrows_the_pooled_prefix():
     controller = bg._DepthController(3, acceptance_by_depth=True)
     for _ in range(60):
