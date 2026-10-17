@@ -153,6 +153,7 @@ def _custom_kernel_build_kwargs() -> dict:
                     f"{qwen}/qwen35_prefill.cpp",
                     f"{qwen}/qwen35_oq_a8.cpp",
                     f"{qwen}/qwen35_ane.mm",
+                    f"{qwen}/moe_staging.cpp",
                 ],
                 include_dirs=[qwen, common],
                 metal_libraries=qwen_libraries,

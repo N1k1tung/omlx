@@ -2385,6 +2385,8 @@ class Scheduler:
         self._prefill_transient_tracker = PrefillTransientTracker(
             model_id=_tracker_model_id
         )
+        # (pool bytes, tokens) left by the last prefill chunk until a clear.
+        self._prefill_chunk_pool: tuple[int, int] | None = None
         # One-shot probe of the GDN/Mamba fixed recurrent-state footprint,
         # armed by _set_model_info_for_monitor when ArraysCache layers exist
         # and taken after the first prefill chunk's eval.
@@ -5502,6 +5504,7 @@ class Scheduler:
                 # so a large restored prefix is never held twice across all
                 # layers. Nothing later reuses these sizes.
                 _sync_and_clear_cache(self._stream)
+        self._prefill_chunk_pool = None
         logger.info(
             "Reserved prefill capacity for %d tokens across %d caches (+%.2fGB)",
             int(tokens),
@@ -5821,6 +5824,7 @@ class Scheduler:
         # release, so a footprint delta read here can miss the whole pool.
         pooled = int(mx.get_cache_memory()) if track else 0
         _sync_and_clear_cache(self._stream)
+        self._prefill_chunk_pool = None
         if track:
             tracker.record_flat_reclaim(max(0, pooled))
 
@@ -5877,6 +5881,20 @@ class Scheduler:
         cpu = max(0, int(get_phys_footprint()) - int(get_graphics_footprint()))
         return active, active + pooled, cpu
 
+    def _unowned_pool_bytes(self, n_tokens: int, pre_pool: int, post_pool: int) -> int:
+        """Return pre-chunk pool this chunk did not fill, and record what it owns.
+
+        Only a previous chunk of the same width leaves reusable buffers.
+        Decode buffers and a wider chunk's pool are already in current usage.
+        """
+        owned = 0
+        last = getattr(self, "_prefill_chunk_pool", None)
+        if last is not None and last[1] == n_tokens:
+            owned = last[0]
+        unowned = min(max(0, pre_pool - owned), post_pool)
+        self._prefill_chunk_pool = (post_pool - unowned, n_tokens)
+        return unowned
+
     def _record_chunk_transient(
         self,
         n_tokens: int,
@@ -5888,6 +5906,7 @@ class Scheduler:
         kv_len: int = 0,
         requested_step: int | None = None,
         gathered_core: bool = False,
+        unowned_pool_bytes: int = 0,
     ) -> None:
         """Record footprint growth after a completed prefill chunk.
 
@@ -5941,6 +5960,8 @@ class Scheduler:
                 / 1024**2,
             )
             return
+        # Pool this chunk did not fill is fixed, not per-token work.
+        delta -= unowned_pool_bytes
         # The reclaim ledger sees every measurement, including samples the
         # EWMA gates below skip: a release on a sub-floor tail must still be
         # priced, and any positive growth confirms the pool reallocation and
@@ -5994,12 +6015,13 @@ class Scheduler:
             gathered_core=gathered_core,
         )
         logger.debug(
-            "[throttle:%s] measure rid=%s n=%d kv_len=%d transient=%.2fMB per_token=%.1fKB ewma=%.1fKB observed_max=%.1fMB samples=%d",
+            "[throttle:%s] measure rid=%s n=%d kv_len=%d transient=%.2fMB unowned_pool=%.2fMB per_token=%.1fKB ewma=%.1fKB observed_max=%.1fMB samples=%d",
             loop_label,
             request_id,
             n_tokens,
             kv_len,
             delta / 1024**2,
+            unowned_pool_bytes / 1024**2,
             (delta / max(n_tokens, 1)) / 1024,
             self._prefill_transient_tracker.bytes_per_token_for(gathered_core)
             / 1024,
@@ -6646,7 +6668,7 @@ class Scheduler:
                     int(plan.requested_step)
                 )
 
-        _pre_active, _, _pre_cpu = Scheduler._chunk_memory_sample()
+        _pre_active, _pre_total, _pre_cpu = Scheduler._chunk_memory_sample()
         # Chunked prefill also bypasses BatchGenerator and must establish the
         # same per-engine stream context as the regular external prefill path.
         # The chunk views stay inside it for the same reason (single-stream
@@ -6658,9 +6680,12 @@ class Scheduler:
             else:
                 Scheduler._forward_packed_prefill(self, plans)
         _trace_model_ms = (time.perf_counter() - _trace_model_start) * 1000.0
-        _, _post_total, _post_cpu = Scheduler._chunk_memory_sample()
+        _post_active, _post_total, _post_cpu = Scheduler._chunk_memory_sample()
         _throttle_pre = _pre_active + _pre_cpu
         _throttle_post = _post_total + max(_pre_cpu, _post_cpu)
+        _unowned_pool = Scheduler._unowned_pool_bytes(
+            self, total_tokens, _pre_total - _pre_active, _post_total - _post_active
+        )
         for plan, before in zip(plans, processed_before):
             if not plan.qwen4_accounting:
                 continue
@@ -6690,6 +6715,7 @@ class Scheduler:
             kv_len=kv_len,
             requested_step=head.requested_step,
             gathered_core=all(plan.gathered_core for plan in plans),
+            unowned_pool_bytes=_unowned_pool,
         )
         for plan in plans:
             if len(plans) > 1:
