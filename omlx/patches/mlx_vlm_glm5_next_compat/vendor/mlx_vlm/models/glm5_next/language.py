@@ -1898,6 +1898,7 @@ class Glm5NextMLP(nn.Module):
         self.gate_proj = nn.Linear(config.hidden_size, intermediate_size, bias=False)
         self.up_proj = nn.Linear(config.hidden_size, intermediate_size, bias=False)
         self.down_proj = nn.Linear(intermediate_size, config.hidden_size, bias=False)
+        self._gate_up = None
 
     def __call__(self, x: mx.array) -> mx.array:
         if (
@@ -1912,8 +1913,43 @@ class Glm5NextMLP(nn.Module):
             )
             if act is not None:
                 return linear_forward(self.down_proj, act.reshape(1, 1, -1))
-        gate = linear_forward(self.gate_proj, x)
-        up = linear_forward(self.up_proj, x)
+        gate_up = None
+        if (
+            _DECODE_FUSION
+            and not self.training
+            and _verify_qmm_armed()
+            and x.shape == (1, 8, 4096)
+            and x.dtype == mx.bfloat16
+        ):
+            g, u = (
+                _decode_kernels._affine_parts(m)
+                for m in (self.gate_proj, self.up_proj)
+            )
+            if (
+                g is not None
+                and u is not None
+                and g[3:] == u[3:] == (8, 64)
+                and g[0].shape == u[0].shape == (2048, 1024)
+                and all(a.dtype == x.dtype for a in (*g[1:3], *u[1:3]))
+            ):
+                # Measured W8 shared-expert shape: the joined N=4096 takes
+                # the existing wide tile. Extend only after exactness and
+                # complete-forward timing checks at the additional shapes.
+                if self._gate_up is None:
+                    # Kept alongside the original weights: the stock path still
+                    # serves every other shape, so the concatenation adds
+                    # ~0.75 GB of resident weight copies for this checkpoint.
+                    self._gate_up = tuple(
+                        mx.concatenate([a, b], axis=0) for a, b in zip(g[:3], u[:3])
+                    )
+                gate_up = fused_quantized_matmul(
+                    x, *self._gate_up, bits=8, group_size=64
+                )
+        if gate_up is None:
+            gate = linear_forward(self.gate_proj, x)
+            up = linear_forward(self.up_proj, x)
+        else:
+            gate, up = mx.split(gate_up, 2, axis=-1)
         if self.limit is not None:
             return linear_forward(
                 self.down_proj, _clamped_swiglu(up, gate, float(self.limit))

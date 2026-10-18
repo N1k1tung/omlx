@@ -3658,6 +3658,50 @@ def test_one_token_dense_mlp_gate_up_is_bitwise_reference(bits, monkeypatch):
 
 
 @pytest.mark.usefixtures("glm5_fused_decode")
+def test_shared_w8_gate_up_concat_is_bitwise_reference(monkeypatch):
+    language = _language()
+    mx.random.seed(41)
+    cfg = SimpleNamespace(hidden_size=4096, intermediate_size=2048, swiglu_limit=10.0)
+    mlp = language.Glm5NextMLP(cfg)
+    mlp.gate_proj = _quantized_linear(2048, 4096, 8)
+    mlp.up_proj = _quantized_linear(2048, 4096, 8)
+    mlp.down_proj = _quantized_linear(4096, 2048, 8)
+    mlp.eval()
+    mx.eval(mlp.parameters())
+    assert qwen35_verify_qmm.apply_verify_qmm_patch()
+    qwen35_verify_qmm.set_verify_qmm_armed(True, model_type="glm5_next")
+    try:
+        x = mx.random.normal((1, 8, 4096)).astype(mx.bfloat16)
+        # The decoder primes each verify shape eagerly before compiling FFN.
+        actual = mlp(x)
+        cached = mlp._gate_up
+        assert cached is not None
+        compiled = mx.compile(mlp)
+        for scale in (0.5, 1.0, 8.0):
+            inputs = x * scale
+            actual = compiled(inputs)
+            with monkeypatch.context() as m:
+                m.setattr(language, "_DECODE_FUSION", False)
+                reference = mlp(inputs)
+            assert _mismatches(actual, reference) == 0
+            assert mlp._gate_up is cached
+
+        # Unsupported widths and additive biases retain their ordinary path.
+        mlp._gate_up = None
+        mlp(x[:, :4])
+        assert mlp._gate_up is None
+        mlp.gate_proj.bias = mx.ones((2048,), dtype=mx.bfloat16)
+        actual = mlp(x)
+        assert mlp._gate_up is None
+        with monkeypatch.context() as m:
+            m.setattr(language, "_DECODE_FUSION", False)
+            reference = mlp(x)
+        assert _mismatches(actual, reference) == 0
+    finally:
+        qwen35_verify_qmm.set_verify_qmm_armed(False)
+
+
+@pytest.mark.usefixtures("glm5_fused_decode")
 @pytest.mark.parametrize("bits", [8, 5, 4, 6])
 @pytest.mark.parametrize("n_k", [(512, 256), (256, 512), (128, 1024)])
 def test_one_token_mla_head_qmv_is_bitwise_reference(bits, n_k):
