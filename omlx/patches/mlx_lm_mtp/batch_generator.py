@@ -2608,7 +2608,11 @@ class _DepthController:
     # depths have actually been measured; after that the marginal is the
     # measured slope between depths. 7 ms matches dense backbones (6-10 ms).
     MARGINAL_MS = 7.0
-    HYSTERESIS = 1.03  # switch depth only for a >3% score gain
+    HYSTERESIS = 1.08  # switch depth only for a >8% score gain: above the
+    # ~1-2% per-cycle score movement estimate noise produces (cost EMA alpha
+    # ~0.11 x +-10% single-cycle samples), so noise stops drawing 13-25 flips
+    # per request; probe bursts still move a rival's estimate ~37% of its gap
+    # and cross the bar within 1-2 bursts.
     # Hand-off gate: ``t[0]`` is measured INSIDE the MTP loop, so it carries
     # the loop's synchronous host round-trip that the standard decoder
     # pipelines away. Speculation that cannot beat this taxed baseline by
