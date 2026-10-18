@@ -2027,7 +2027,7 @@ class Glm5NextMoE(nn.Module):
         if y is not None:
             return y
         indices, scores = self.gate(x)
-        y = None #self._decode_experts(x, indices, scores)
+        y = self._decode_experts(x, indices, scores)
         if y is not None:
             return y
         y = self.switch_mlp(x, indices, scores=scores, weighted_sum=True)
