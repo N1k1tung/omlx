@@ -2982,6 +2982,8 @@ class VLMBatchedEngine(BaseEngine):
         language_model = getattr(self._adapter, "_language_model", None)
         if self._dflash_drafter is not None and language_model is not None:
             detach_drafter(language_model)
+        # The stop coroutine must not pin weights across the final MLX reclaim.
+        del language_model
         _clear_teardown_references(
             self,
             none_attrs=(

@@ -11,8 +11,10 @@ Tests cover:
 """
 
 import base64
+import gc
 import io
 import json
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -2994,6 +2996,44 @@ class TestStopSafety:
         # The memory enforcer reads a loaded engine with no scheduler as a
         # wrapper break, so the flag must drop together with _engine.
         assert loaded_at_close == [False]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("dflash", [False, True])
+    async def test_stop_releases_language_model_before_inner_reclaim(self, dflash):
+        """Coroutine locals must not retain weights through the final reclaim."""
+        from omlx.models.vlm import VLMModelAdapter
+
+        class LanguageModel:
+            pass
+
+        engine = _make_engine()
+        language_model = LanguageModel()
+        backbone = weakref.ref(language_model)
+        engine._vlm_model = SimpleNamespace(language_model=language_model)
+        adapter = VLMModelAdapter(engine._vlm_model)
+        engine._adapter = adapter
+        if dflash:
+            engine._dflash_drafter = SimpleNamespace(clear=lambda: None)
+            language_model._omlx_drafter = engine._dflash_drafter
+        del language_model
+        alive_at_reclaim = []
+
+        def close():
+            adapter.release_resources()
+            gc.collect()
+            alive_at_reclaim.append(backbone() is not None)
+
+        engine._engine = SimpleNamespace(
+            stop=AsyncMock(), engine=SimpleNamespace(close=close)
+        )
+        with patch(
+            "omlx.patches.qwen35_ane_prefill.release_qwen35_ane_prefill",
+            new=lambda _: (0, 0),
+        ):
+            await engine.stop()
+
+        assert alive_at_reclaim == [False]
+        assert backbone() is None
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("release_fails", [False, True])
