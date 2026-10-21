@@ -782,10 +782,73 @@ def test_sorted_routes_chunk_on_expert_boundaries(tmp_path, monkeypatch):
         # chunk, never a chunk cut inside an expert's run.
         assert calls == [4, 3, 5, 3]
         assert disk.slots.misses == 8 and disk.slots.hits == 0
-        # A second sweep evicts the last resident pair before reaching it:
-        # sorted routes over more experts than slots thrash by construction.
-        disk(x, idx, weights, sorted_indices=True)
-        assert disk.slots.misses == 16 and disk.slots.hits == 0
+        # A second sweep executes the surviving pair's runs before any miss
+        # is read: two hits, six fetches, and the caller's route order back.
+        actual = disk(x, idx, weights, sorted_indices=True)
+        mx.eval(actual)
+        np.testing.assert_allclose(
+            actual.astype(mx.float32),
+            expected.astype(mx.float32),
+            rtol=0.01,
+            atol=0.002,
+        )
+        assert calls == [4, 3, 5, 3, 3, 4, 3, 5]
+        assert disk.slots.misses == 14 and disk.slots.hits == 2
+    finally:
+        plan.close()
+
+
+def test_sorted_routes_execute_resident_runs_first(tmp_path):
+    reference, disk, plan = _synthetic_affine_experts(tmp_path, 0.25)
+    try:
+        assert plan.capacity == 2
+        # Warm one expert alone; the other stays absent.
+        ids = [6, 6, 6]
+        idx = mx.array(ids)
+        x = mx.random.normal((len(ids), 1, 64)).astype(mx.bfloat16)
+        weights = mx.ones(idx.shape) / 2
+        expected = reference(x, idx, weights, sorted_indices=True)
+        actual = disk(x, idx, weights, sorted_indices=True)
+        mx.eval(expected, actual)
+        np.testing.assert_allclose(
+            actual.astype(mx.float32),
+            expected.astype(mx.float32),
+            rtol=0.01,
+            atol=0.002,
+        )
+        assert disk.slots.misses == 1 and disk.slots.hits == 0
+        # Interleaved runs of a hit and a miss: the hit executes first, the
+        # repeated expert gathers from scattered positions, and the caller's
+        # route order comes back.
+        ids = [3, 6, 3, 6]
+        idx = mx.array(ids)
+        x = mx.random.normal((len(ids), 1, 64)).astype(mx.bfloat16)
+        weights = mx.ones(idx.shape) / 2
+        expected = reference(x, idx, weights, sorted_indices=True)
+        actual = disk(x, idx, weights, sorted_indices=True)
+        mx.eval(expected, actual)
+        np.testing.assert_allclose(
+            actual.astype(mx.float32),
+            expected.astype(mx.float32),
+            rtol=0.01,
+            atol=0.002,
+        )
+        assert disk.slots.misses == 2 and disk.slots.hits == 1
+        # A warm exactly-capacity sweep is pure hits in the caller's order.
+        ids = [3, 3, 6, 6]
+        idx = mx.array(ids)
+        x = mx.random.normal((len(ids), 1, 64)).astype(mx.bfloat16)
+        weights = mx.ones(idx.shape) / 2
+        expected = reference(x, idx, weights, sorted_indices=True)
+        actual = disk(x, idx, weights, sorted_indices=True)
+        mx.eval(expected, actual)
+        np.testing.assert_allclose(
+            actual.astype(mx.float32),
+            expected.astype(mx.float32),
+            rtol=0.01,
+            atol=0.002,
+        )
+        assert disk.slots.misses == 2 and disk.slots.hits == 3
     finally:
         plan.close()
 

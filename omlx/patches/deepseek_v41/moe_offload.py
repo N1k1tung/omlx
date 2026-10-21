@@ -581,34 +581,77 @@ class OffloadedExpert(nn.Module):
         A chunk holds every route of up to ``capacity`` distinct experts, so a
         prefill reads each expert once per layer and runs one kernel per
         chunk instead of one per ``capacity`` routes.
+
+        Runs whose experts are resident at call entry execute before any miss
+        is read, so a repeated sweep hits the survivors instead of fetching
+        them again mid-call after an earlier chunk's misses evicted them. At
+        most ``capacity`` experts are resident, so they all run before the
+        first read can evict one. The execution order is a permutation of the
+        caller's, so the concatenated output is permuted back before return.
         """
         ids = indices.reshape(-1).tolist()
         rows = x.reshape(-1, 1, x.shape[-1])
         scores = None if weights is None else weights.reshape(-1)
         capacity = self.slots.plan.capacity
-        outputs = []
+
+        runs = []
         start = 0
         while start < len(ids):
-            end, distinct = start, 0
-            while end < len(ids) and distinct < capacity:
-                run = end + 1
-                while run < len(ids) and ids[run] == ids[end]:
-                    run += 1
-                end, distinct = run, distinct + 1
-            slots = mx.array(self.slots.ensure_ids(ids[start:end]), dtype=mx.int32)
-            order = mx.argsort(slots)
-            inverse = mx.argsort(order)
-            out = self.slots.expert(
-                rows[start:end][order],
-                slots[order],
-                None if scores is None else scores[start:end][order],
-                sorted_indices=True,
-                input_quantized=input_quantized,
-            )[inverse]
-            mx.eval(out)
-            outputs.append(out)
+            end = start + 1
+            while end < len(ids) and ids[end] == ids[start]:
+                end += 1
+            runs.append((start, end))
             start = end
-        return outputs
+        resident = set(self.slots.slot_of)
+        groups = (
+            [run for run in runs if ids[run[0]] in resident],
+            [run for run in runs if ids[run[0]] not in resident],
+        )
+        outputs, positions = [], []
+        ordered, cursor = True, 0
+        for group in groups:
+            start = 0
+            while start < len(group):
+                end, distinct = start, 0
+                while end < len(group) and distinct < capacity:
+                    end, distinct = end + 1, distinct + 1
+                chunk = group[start:end]
+                first, last = chunk[0][0], chunk[-1][1]
+                contiguous = all(
+                    chunk[i][1] == chunk[i + 1][0] for i in range(len(chunk) - 1)
+                )
+                if contiguous:
+                    index = range(first, last)
+                    chunk_ids = ids[first:last]
+                    source = slice(first, last)
+                else:
+                    index = [p for run in chunk for p in range(run[0], run[1])]
+                    chunk_ids = [ids[p] for p in index]
+                    source = mx.array(index, mx.int32)
+                    ordered = False
+                if first != cursor:
+                    ordered = False
+                cursor += last - first
+                positions.extend(index)
+                chunk_rows = rows[source]
+                chunk_scores = None if scores is None else scores[source]
+                slots = mx.array(self.slots.ensure_ids(chunk_ids), dtype=mx.int32)
+                order = mx.argsort(slots)
+                inverse = mx.argsort(order)
+                out = self.slots.expert(
+                    chunk_rows[order],
+                    slots[order],
+                    None if chunk_scores is None else chunk_scores[order],
+                    sorted_indices=True,
+                    input_quantized=input_quantized,
+                )[inverse]
+                mx.eval(out)
+                outputs.append(out)
+                start = end
+        if ordered:
+            return outputs
+        out = mx.concatenate(outputs, axis=0)
+        return [out[mx.argsort(mx.array(positions, mx.int32))]]
 
 
 def _plan(path, fraction, mtp_resident=False):
