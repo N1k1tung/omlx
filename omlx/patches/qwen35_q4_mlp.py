@@ -116,10 +116,10 @@ def _backend_or_qmm(linear: Any, x: mx.array, variant: int) -> mx.array:
 
 def _native_qmm_for_bits(bits: int) -> Callable[..., mx.array] | None:
     try:
-        from omlx.custom_kernels.qwen35_prefill import fast
+        from omlx.custom_kernels.quant_matmul import fast
     except Exception:
         return None
-    name = f"qwen35_q{bits}_affine_qmm_t"
+    name = f"affine_q{bits}_qmm_t"
     if bits not in _SUPPORTED_QMM_BITS or not fast.has_symbol(name):
         return None
     return getattr(fast, name)
@@ -127,7 +127,7 @@ def _native_qmm_for_bits(bits: int) -> Callable[..., mx.array] | None:
 
 def _qmm_supports_group_size(group_size: int) -> bool:
     try:
-        from omlx.custom_kernels.qwen35_prefill import fast
+        from omlx.custom_kernels.quant_matmul import fast
     except Exception:
         return False
     return fast.qmm_supports_group_size(group_size)

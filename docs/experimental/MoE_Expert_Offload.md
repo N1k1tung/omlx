@@ -263,7 +263,7 @@ GLM-5.2 and GLM-5.3 (`model_type: glm_moe_dsa`: 78 layers, the first 3 dense,
 256 routed experts, top-8, one shared expert) run their routed experts
 through oMLX's own GLM SwitchGLU, which fuses the gate and up projections at
 load and, on sorted calls, returns the routes already weighted and summed by
-the native `glm_moe_weighted_sum` kernel. The adapter in
+the native `moe_weighted_sum` kernel. The adapter in
 `omlx/patches/glm_moe_dsa/moe_offload.py` keeps that module and its kernels:
 each projection's parameters are replaced by resident slots before lazy
 weights materialize, expert ids are translated to slot ids, and the module's

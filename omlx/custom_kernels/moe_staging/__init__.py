@@ -8,11 +8,11 @@ from dataclasses import dataclass
 import mlx.core as mx
 import numpy as np
 
-from ..qwen35_prefill.fast import _ext as _qwen35_ext
+from ..quant_matmul.fast import _ext as _quant_ext
 
 logger = logging.getLogger(__name__)
 
-_native = getattr(_qwen35_ext, "moe_staging", None)
+_native = getattr(_quant_ext, "moe_staging", None)
 NATIVE_AVAILABLE = _native is not None
 
 # Match the qualified 40-expert pool, independent of IO batch size. Refuse
