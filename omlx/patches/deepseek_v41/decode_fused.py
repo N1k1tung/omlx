@@ -19,7 +19,13 @@ from . import decode_layer as DL
 from . import decode_moe as DM
 from . import growth
 from .kernels import index_select, packed_index_scores, packed_index_topk
+from .moe_offload import OffloadedExpert
 from .quantization import QuantizedProjection, pack_activation, quantize_activation
+
+# Hybrid offloaded decode reuses the fused attention/mHC kernels, whose accumulation
+# order differs from the unfused path (same drift class as resident fused decode): on
+# the supplied checkpoint greedy output diverged from the unfused stream at token 27
+# of a fixed prose prompt. Accepted for the ~15% per-layer decode win.
 
 
 def _cos_sin(c, compressed, start):
@@ -724,28 +730,43 @@ def decode_block_verify(blk, h, pre, cache, shared, start, c):
     return h3.reshape(1, r_n, hc, dim), fp.reshape(1, r_n, hc)
 
 
+def _attention_supported(blk, c):
+    """Attention and hyper-connection layouts shared by full and hybrid decode."""
+    att = blk.attn
+    return bool(
+        c.hc_mult == 4
+        and c.dim % 1024 == 0
+        and c.head_dim % 256 == 0  # split_attention's layout (V4.1: 512)
+        and c.n_heads % 8 == 0
+        and all(_fused_projection(getattr(att, n)) for n in ("wq_a", "wkv", "wq_b", "wo_b"))
+        and _woa_mxfp8(att) is not None
+    )
+
+
 def supported(blk, c):
-    """Static support check for a decoder block (cached on the block): the layouts the fused
-    kernels read (MXFP8 or affine attention projections with FP8-quantized inputs, an exactly
-    MXFP8-representable bf16 wo_a, MXFP4 / MXFP8 / affine routed and MXFP8 / affine shared
-    experts) and the shapes they assume. Anything else keeps the unfused path."""
+    """Fully fused decode, including resident routed experts; batched/verify gate."""
+    if isinstance(blk.ffn.experts, OffloadedExpert):
+        return False
     ok = getattr(blk, "_fused_decode_ok", None)
     if ok is None:
-        att = blk.attn
-        ok = bool(
-            c.hc_mult == 4
-            and c.dim % 1024 == 0
-            and c.head_dim % 256 == 0   # split_attention's layout (V4.1: 512)
-            and c.n_heads % 8 == 0
-            and all(_fused_projection(getattr(att, n)) for n in ("wq_a", "wkv", "wq_b", "wo_b"))
-            and DM.supported(blk.ffn, _empty((1, 1, c.dim), mx.bfloat16), c)
-            and _woa_mxfp8(att) is not None
+        ok = _attention_supported(blk, c) and DM.supported(
+            blk.ffn, _empty((1, 1, c.dim), mx.bfloat16), c
         )
         object.__setattr__(blk, "_fused_decode_ok", ok)
     return ok
 
 
-def decode_block(blk, h, pre, cache, shared, start, c):
+def hybrid_supported(blk, c):
+    """Ordinary single-token decode with global expert IDs handled by OffloadedExpert."""
+    return (
+        isinstance(blk.ffn.experts, OffloadedExpert)
+        and not c.ced_prefill
+        and not getattr(blk, "_omlx_verify_exact", False)
+        and _attention_supported(blk, c)
+    )
+
+
+def decode_block(blk, h, pre, cache, shared, start, c, *, hybrid=False):
     """Block.__call__ for one token. h: [1, 1, hc, dim] bf16, pre: [1, 1, hc] fp32."""
     hc, dim = c.hc_mult, c.dim
     hf = h.reshape(-1)
@@ -755,7 +776,9 @@ def decode_block(blk, h, pre, cache, shared, start, c):
     a = blk.sum_ranks(decode_attention(blk.attn, x, xq, cache, shared, start, c, tiles))
     coef_f, x2, _, h2 = mix(blk, "ffn", c, hf, ap, sub=a, post=ao, comb=ac)
     fp, fo, fc = coef_f[:hc], coef_f[hc:2 * hc], coef_f[2 * hc:]
-    if tiles:
+    if hybrid:
+        f = blk.ffn(x2.reshape(1, 1, -1), None).reshape(-1)
+    elif tiles:
         f = DM.fused_decode_moe_nb(blk.ffn, x2.reshape(1, -1), c, mma=True)[0].reshape(-1)
     else:
         f = DM.fused_decode_moe(blk.ffn, x2.reshape(1, 1, -1), c)[0].reshape(-1)

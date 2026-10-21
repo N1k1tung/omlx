@@ -181,24 +181,177 @@ def test_fused_decode_rejects_unsupported_layouts():
     assert not decode_fused.supported(model.layers[3], c)
 
 
-def test_offloaded_experts_decode_on_the_unfused_path(tmp_path):
-    model = build()
+def _offload_experts(model, tmp_path):
     c = model._config
     specs, tensors = {}, {}
     for i, layer in enumerate(model.layers):
         prefix = f"language_model.layers.{i}.ffn.experts"
-        specs.update({f"{prefix}.{proj}": dict(bits=4, mode="mxfp4") for proj in ("w1", "w2", "w3")})
+        specs.update({
+            f"{prefix}.{proj}": dict(
+                bits=getattr(layer.ffn.experts, proj).bits,
+                mode=getattr(layer.ffn.experts, proj).mode,
+                group_size=getattr(layer.ffn.experts, proj).group_size,
+            )
+            for proj in ("w1", "w2", "w3")
+        })
         tensors.update({f"{prefix}.{k}": v for k, v in tree_flatten(layer.ffn.experts.parameters())})
     mx.save_safetensors(str(tmp_path / "model.safetensors"), tensors)
     raw = {"omlx_deepseek_v41": {"version": 1, "quantized_modules": specs}}
     plan = ExpertOffloadPlan(tmp_path, raw, {k: "model.safetensors" for k in tensors}, c, 0.5)
+    for i, layer in enumerate(model.layers):
+        layer.ffn.experts = OffloadedExpert(layer.ffn.experts, plan, f"language_model.layers.{i}.ffn.experts")
+    return plan
+
+
+def test_offloaded_experts_use_single_token_hybrid(tmp_path, monkeypatch):
+    model = build()
+    c = model._config
+    # A support result cached before the wrapper must not admit a resident MoE kernel.
+    assert decode_fused.supported(model.layers[0], c)
+    plan = _offload_experts(model, tmp_path)
+    calls = []
+    routes = []
+    real = decode_fused.decode_block
+    real_expert = OffloadedExpert.__call__
+
+    def counted(*args, **kwargs):
+        calls.append(kwargs.get("hybrid", False))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(decode_fused, "decode_block", counted)
+
+    def routed(self, x, indices, *args, **kwargs):
+        routes.extend(indices.reshape(-1).tolist())
+        return real_expert(self, x, indices, *args, **kwargs)
+
+    monkeypatch.setattr(OffloadedExpert, "__call__", routed)
     try:
-        for i, layer in enumerate(model.layers):
-            layer.ffn.experts = OffloadedExpert(layer.ffn.experts, plan, f"language_model.layers.{i}.ffn.experts")
+        for layer in model.layers:
+            layer.ffn.gate.bias = mx.array([-1000] * 6 + [1000, 1000], mx.float32)
         assert not decode_fused.supported(model.layers[0], c)
+        assert decode_fused.hybrid_supported(model.layers[0], c)
+        assert not model._stages_decode_fused()
         cache = model.make_cache()
         mx.eval(model(mx.array([[1, 2, 3, 4, 5]]), cache=cache))
         assert mx.isfinite(model(mx.array([[6]]), cache=cache)).all().item()
+        assert calls == [True] * c.n_layers
+        assert routes and set(routes) == {6, 7}
+        assert max(routes) >= plan.capacity  # Global IDs, not resident slot IDs.
+    finally:
+        plan.close()
+
+
+@pytest.mark.parametrize(
+    "fmt,prompt_length,engram",
+    [("mxfp", 2, False), ("mxfp", 11, True),
+     ("affine", 2, False), ("affine", 11, False)],
+)
+def test_offloaded_hybrid_matches_unfused_per_layer(
+    tmp_path, monkeypatch, fmt, prompt_length, engram
+):
+    options = {}
+    if engram:
+        options = dict(
+            engram_layer_ids=(1,), engram_num_embeddings=(72,),
+            engram_vocab_size=5, engram_max_ngram_size=4,
+            engram_n_heads=2, engram_head_dim=32,
+            engram_compressed_vocab_size=64,
+        )
+    model = build(fmt=fmt, **options)
+    if engram:
+        model.set_token_map(np.arange(model._config.vocab_size))
+    plan = _offload_experts(model, tmp_path)
+    real_hybrid = decode_fused.hybrid_supported
+    enabled = [False]
+    hybrid_calls = []
+    real_decode = decode_fused.decode_block
+
+    def counted(*args, **kwargs):
+        hybrid_calls.append(kwargs.get("hybrid", False))
+        return real_decode(*args, **kwargs)
+
+    monkeypatch.setattr(decode_fused, "decode_block", counted)
+    monkeypatch.setattr(
+        decode_fused, "hybrid_supported",
+        lambda block, c: enabled[0] and real_hybrid(block, c),
+    )
+    ids = np.random.default_rng(13).integers(3, 60, prompt_length + 1).tolist()
+    caches = [model.make_cache(), model.make_cache()]
+    try:
+        for cache in caches:
+            mx.eval(model(mx.array([ids[:-1]]), cache=cache))
+        saved, max_error, rms_error = [], 0.0, 0.0
+        real_block = Block.__call__
+
+        def compare(self, h, pre, *args, **kwargs):
+            nonlocal max_error, rms_error
+            if not enabled[0]:
+                out = real_block(self, h, pre, *args, **kwargs)
+                saved.append((h, pre, out))
+                return out
+            h, pre, expected = saved.pop(0)
+            out = real_block(self, h, pre, *args, **kwargs)
+            ref = np.asarray(expected[0].astype(mx.float32))
+            diff = np.asarray(out[0].astype(mx.float32)) - ref
+            max_error = max(max_error, float(np.max(np.abs(diff)) / np.max(np.abs(ref))))
+            rms_error = max(rms_error, float(np.sqrt(np.mean(diff * diff) / np.mean(ref * ref))))
+            return out
+
+        monkeypatch.setattr(Block, "__call__", compare)
+        for enabled[0], cache in ((False, caches[0]), (True, caches[1])):
+            mx.eval(model(mx.array([[ids[-1]]]), cache=cache))
+        assert not saved
+        assert hybrid_calls == [True] * model._config.n_layers
+        assert max_error < 0.05 and rms_error < 0.05, (fmt, prompt_length, max_error, rms_error)
+        print(f"offloaded hybrid {fmt=} {prompt_length=} {engram=} max={max_error:.6f} rms={rms_error:.6f}")
+    finally:
+        plan.close()
+
+
+def test_offloaded_hybrid_rejects_other_decode_modes(tmp_path, monkeypatch):
+    from omlx.patches.deepseek_v41.cache import DeepseekV41Cache
+
+    model = build()
+    plan = _offload_experts(model, tmp_path)
+    block, c = model.layers[0], model._config
+    h = mx.ones((1, 1, c.hc_mult, c.dim), mx.bfloat16)
+    pre = mx.array([[[1, 0, 0, 0]]], mx.float32)
+    calls = []
+    real = decode_fused.decode_block
+
+    def counted(*args, **kwargs):
+        calls.append(kwargs.get("hybrid", False))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(decode_fused, "decode_block", counted)
+
+    def run(*, image_mask=None, ced_tail=None, verify=False):
+        cache = DeepseekV41Cache(0)
+        if verify:
+            cache._mtp_verify_state = {}
+        out = block(h, pre, cache, {}, 0, image_mask, ced_tail)
+        mx.eval(out)
+        assert not calls
+
+    try:
+        run(image_mask=mx.array([[False]]))
+        run(ced_tail=1)
+        run(verify=True)
+        object.__setattr__(block, "_omlx_verify_exact", True)
+        assert not decode_fused.hybrid_supported(block, c)
+        run()
+        object.__setattr__(block, "_omlx_verify_exact", False)
+        c.ced_prefill = True
+        assert not decode_fused.hybrid_supported(block, c)
+        run()
+        c.ced_prefill = False
+        att = block.attn
+        weight = mx.dequantize(att.wq_b.weight, att.wq_b.scales, None,
+                               group_size=32, bits=8, mode="mxfp8", dtype=mx.bfloat16)
+        packed, scales = mx.quantize(weight, group_size=32, bits=4, mode="mxfp4")
+        att.wq_b = QuantizedProjection(packed, scales, 4, "mxfp4")
+        assert not decode_fused.hybrid_supported(block, c)
+        run()
     finally:
         plan.close()
 

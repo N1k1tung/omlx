@@ -893,15 +893,20 @@ class Block(nn.Module):
         return x if group is None else mx.distributed.all_sum(x, group=group)
 
     def __call__(self, h, pre, cache, shared, start, image_mask, ced_tail=None):
-        if (
+        single_decode = (
             ced_tail is None
             and image_mask is None
             and h.shape[0] == 1
             and h.shape[1] == 1
             and getattr(cache, "_mtp_verify_state", None) is None
-            and decode_fused.supported(self, self._config)
-        ):
-            return decode_fused.decode_block(self, h, pre, cache, shared, start, self._config)
+        )
+        if single_decode:
+            if decode_fused.supported(self, self._config):
+                return decode_fused.decode_block(self, h, pre, cache, shared, start, self._config)
+            if decode_fused.hybrid_supported(self, self._config):
+                return decode_fused.decode_block(
+                    self, h, pre, cache, shared, start, self._config, hybrid=True
+                )
         if (
             shared.get("_verify_rows")
             and ced_tail is None
