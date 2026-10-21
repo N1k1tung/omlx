@@ -15,7 +15,7 @@ import contextlib
 import json
 import math
 import os
-from collections import namedtuple
+from collections import Counter, namedtuple
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from pathlib import Path
@@ -25,6 +25,8 @@ import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 
+from ...custom_kernels.moe_staging import MAX_BYTES, StagedRead, Staging
+from ...custom_kernels.moe_staging import NATIVE_AVAILABLE as STAGING_AVAILABLE
 from .convert import repack_weight, source_quantization_spec
 from .quantization import QuantizedProjection
 from .residency import (
@@ -47,7 +49,7 @@ _EXPERT_IO_POOL = ThreadPoolExecutor(
 )
 
 # One positional read: a whole tensor, or one leading-axis row of it.
-Slab = namedtuple("Slab", "key expert fd offset nbytes dtype shape")
+Slab = namedtuple("Slab", "key expert fd offset nbytes dtype shape np_dtype mx_view")
 
 
 def _fields(spec):
@@ -95,6 +97,8 @@ class ExpertOffloadPlan:
         self._fds = {}
         self._lock = Lock()
         self._closed = False
+        self._staging_layouts = {}
+        self._staging = None
         self.draft_bytes = 0
         if self.converted is not None:
             for key in mapping:
@@ -110,6 +114,7 @@ class ExpertOffloadPlan:
         for layer in range(config.n_layers):
             prefix = f"language_model.layers.{layer}.ffn.experts"
             specs = {}
+            self._staging_layouts[prefix] = []
             self.layer_bytes[prefix] = 0
             for proj in _PROJECTIONS:
                 shape = (
@@ -122,6 +127,23 @@ class ExpertOffloadPlan:
         self.expert_bytes = (
             self.full_bytes // (self.count * len(self.layers)) if self.layers else 0
         )
+        if STAGING_AVAILABLE and any(self._staging_layouts.values()):
+            counts = Counter()
+            for layout in self._staging_layouts.values():
+                for size, count in Counter(layout).items():
+                    counts[size] = max(counts[size], count)
+            one_set = sum(
+                ((size + 16383) // 16384 * 16384) * count
+                for size, count in counts.items()
+            )
+            sets = min(self.floor, MAX_BYTES // one_set)
+            if sets:
+                sizes = [
+                    size
+                    for size, count in sorted(counts.items())
+                    for _ in range(count * sets)
+                ]
+                self._staging = Staging(sizes, self.read, self._staging_to_mx)
 
     def _header(self, filename):
         if filename not in self._headers:
@@ -243,6 +265,12 @@ class ExpertOffloadPlan:
                 signature, spec = item, current
         self.full_bytes += size
         self.layer_bytes[prefix] += size
+        # First version: original-source FP4 with E8M0 scales only. Other
+        # layouts keep bytes transport until their decode is qualified.
+        if self.converted is None and spec == {"bits": 4, "mode": "mxfp4"}:
+            self._staging_layouts[prefix].extend(
+                (math.prod(expected), math.prod(scale_shape))
+            )
         return spec
 
     def resident_bytes_at(self, capacity):
@@ -289,6 +317,12 @@ class ExpertOffloadPlan:
             nbytes,
             dtype,
             shape,
+            (
+                np.uint8
+                if dtype in ("I8", "U8") or dtype.startswith("F8_E8M0")
+                else SAFETENSORS_NUMPY_DTYPES[dtype]
+            ),
+            mx.uint32 if dtype in ("I8", "U8") else None,
         )
 
     @staticmethod
@@ -323,6 +357,25 @@ class ExpertOffloadPlan:
 
     def decode(self, slabs, raws):
         """Projection arrays from the slabs' bytes, keyed by field."""
+        if any(isinstance(raw, StagedRead) for raw in raws):
+            weight, scale = (
+                self._staging.to_mx(slab, raw) for slab, raw in zip(slabs, raws)
+            )
+            if (
+                len(slabs) != 2
+                or slabs[0].dtype not in ("I8", "U8")
+                or not slabs[1].dtype.startswith("F8_E8M0")
+            ):
+                raise ValueError("Unsupported staged expert layout")
+            if len(slabs[0].shape) != 2 or slabs[0].shape[-1] % 4:
+                raise ValueError(
+                    "Packed matrix must be rank two with 4-byte-aligned rows"
+                )
+            if slabs[1].shape != (slabs[0].shape[0], slabs[0].shape[1] * 2 // 32):
+                raise ValueError("Unexpected block scale shape")
+            if np.any(np.asarray(scale) == 255):
+                raise ValueError("NaN E8M0 scale")
+            return {"weight": weight, "scales": scale}
         if self.converted is not None or slabs[0].dtype == "U32":
             # The packed weight stays uint32: QuantizedProjection drives the
             # quantized matmul, so dequantizing here would defeat the point.
@@ -337,6 +390,11 @@ class ExpertOffloadPlan:
             scale,
             slabs[1].dtype if scale is not None else None,
         )[0]
+
+    @staticmethod
+    def _staging_to_mx(slab, raw):
+        array = mx.array(np.frombuffer(raw, dtype=slab.np_dtype).reshape(slab.shape))
+        return array.view(slab.mx_view) if slab.mx_view is not None else array
 
     def fetch(self, prefix, proj, expert):
         slabs = self.slabs(prefix, proj, expert)
@@ -404,6 +462,9 @@ class _ExpertSlots:
             else:
                 misses.append(expert)
         protected = set(needed)
+        staging = (
+            self.plan._staging.for_owner() if misses and self.plan._staging else None
+        )
         pending = {}
         window = max(1, INFLIGHT_BYTES // max(1, self.plan.expert_bytes))
         submitted = 0
@@ -418,8 +479,15 @@ class _ExpertSlots:
                     slabs = self.plan.slabs(self.prefix, proj, expert)
                     futures = []
                     pending[expert].append((proj, slabs, futures))
+                    eligible = (
+                        staging is not None
+                        and self.plan.converted is None
+                        and self.plan.layers[self.prefix][proj]
+                        == {"bits": 4, "mode": "mxfp4"}
+                    )
+                    read = staging.read if eligible else self.plan.read
                     for slab in slabs:
-                        futures.append(_EXPERT_IO_POOL.submit(self.plan.read, slab))
+                        futures.append(_EXPERT_IO_POOL.submit(read, slab))
 
         try:
             submit(window)

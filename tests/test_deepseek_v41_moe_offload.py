@@ -1,5 +1,6 @@
 """V4.1 expert residency preserves routing, projection arithmetic and loading."""
 
+import gc
 import json
 import weakref
 from concurrent.futures import ThreadPoolExecutor
@@ -305,6 +306,214 @@ def test_original_quantized_expert_reads_repack_only_selected_experts(tmp_path, 
         assert disk.slots.misses > 2
     finally:
         plan.close()
+
+
+def _source_fp4_plan(tmp_path, bad_scale_expert=None, packed_dtype="I8"):
+    from test_deepseek_v41 import raw_safetensors
+
+    from omlx.patches.deepseek_v41.config import ModelConfig
+    from omlx.patches.deepseek_v41.moe_offload import ExpertOffloadPlan
+
+    config = ModelConfig(
+        dim=64, moe_inter_dim=64, n_layers=2, n_routed_experts=8, n_activated_experts=2
+    )
+    mx.random.seed(710)
+    tensors = {}
+    for layer in range(2):
+        for proj in ("w1", "w3", "w2"):
+            weight, scale = mx.quantize(
+                mx.random.normal((8, 64, 64)), bits=4, group_size=32, mode="mxfp4"
+            )
+            for expert in range(8):
+                name = f"layers.{layer}.ffn.experts.{expert}.{proj}"
+                tensors[name + ".weight"] = (
+                    np.asarray(weight[expert]).view(np.uint8),
+                    packed_dtype,
+                )
+                scales = np.asarray(scale[expert]).copy()
+                if expert == bad_scale_expert and layer == 0 and proj == "w3":
+                    scales[0, 0] = 255
+                tensors[name + ".scale"] = (scales, "F8_E8M0")
+    raw_safetensors(tmp_path / "model.safetensors", tensors)
+    mapping = {key: "model.safetensors" for key in tensors}
+    return config, ExpertOffloadPlan(tmp_path, {}, mapping, config, 0.25)
+
+
+@pytest.mark.parametrize("buffers", [None, 1])
+@pytest.mark.parametrize("packed_dtype", ["I8", "U8"])
+def test_source_fp4_staging_matches_bytes_and_cache(tmp_path, buffers, packed_dtype):
+    from omlx.patches.deepseek_v41.language import Expert
+
+    config, baseline = _source_fp4_plan(tmp_path, packed_dtype=packed_dtype)
+    _, staged = _source_fp4_plan(tmp_path, packed_dtype=packed_dtype)
+    assert staged._staging is not None
+    baseline._staging = None
+    if buffers is not None:
+        staged._staging.sizes = staged._staging.sizes[:buffers]
+
+    def run(plan):
+        outputs, states = [], []
+        for layer in range(2):
+            prefix = f"language_model.layers.{layer}.ffn.experts"
+            disk = OffloadedExpert(Expert(config, True), plan, prefix)
+            calls = [
+                (mx.array([[[0, 1]]]), mx.ones((1, 1, 1, 1, 64))),
+                (mx.array([[[1, 1], [2, 3]]]), mx.ones((1, 2, 1, 1, 64))),
+                (mx.array([[[4, 5]]]), mx.ones((1, 1, 1, 1, 64))),
+                (mx.array([[[0, 7]]]), mx.ones((1, 1, 1, 1, 64))),
+                (mx.array([0, 0, 1, 1, 2, 2, 3, 3]), mx.ones((8, 1, 64))),
+            ]
+            for indices, x in calls:
+                sorted_routes = indices.ndim == 1
+                weights = mx.ones(indices.shape) / 2
+                out = disk(
+                    x.astype(mx.bfloat16),
+                    indices,
+                    weights,
+                    sorted_indices=sorted_routes,
+                )
+                mx.eval(out)
+                outputs.append(np.asarray(out.view(mx.uint16)).tobytes())
+                slots = disk.slots
+                states.append(
+                    (
+                        list(slots.slot_of.items()),
+                        list(slots.free),
+                        slots.hits,
+                        slots.misses,
+                        slots.fetched_bytes,
+                        tuple(
+                            np.asarray(
+                                getattr(slots.expert, proj)[field].view(mx.uint8)
+                            ).tobytes()
+                            for proj in ("w1", "w3", "w2")
+                            for field in ("weight", "scales")
+                        ),
+                    )
+                )
+        return outputs, states
+
+    try:
+        assert run(staged) == run(baseline)
+        stats = staged._staging.pool.stats()
+        assert stats["reads"] > 0
+        assert (stats["fallbacks"] > 0) == (buffers == 1)
+        assert stats["allocated_bytes"] <= 128 * 1024 * 1024
+        assert len(staged._staging.sizes) == (1 if buffers else 12)
+    finally:
+        baseline.close()
+        staged.close()
+
+
+def test_source_fp4_staging_lease_and_thread_fallback(tmp_path):
+    from omlx.custom_kernels.moe_staging import StagedRead
+
+    _, plan = _source_fp4_plan(tmp_path)
+    slab = plan.slabs("language_model.layers.0.ffn.experts", "w1", 1)[1]
+    plan._staging.sizes = [slab.nbytes]
+    staging = plan._staging.for_owner()
+    assert staging is not None
+    try:
+        with pytest.raises(OSError, match="short read"):
+            staging.read(slab._replace(offset=1 << 40))
+        assert staging.pool.stats()["busy"] == 0
+        with ThreadPoolExecutor(max_workers=1) as worker:
+            payload = worker.submit(staging.read, slab).result()
+            assert isinstance(payload, StagedRead)
+            lazy = mx.concatenate([staging.to_mx(slab, payload)] * 2)
+            del payload
+            gc.collect()
+            assert staging.pool.stats()["busy"] == 1
+            with ThreadPoolExecutor(max_workers=1) as other:
+                assert other.submit(staging.for_owner).result() is None
+            assert isinstance(staging.read(slab), bytearray)
+            np.asarray(lazy)
+            del lazy
+            mx.synchronize()
+            gc.collect()
+            assert staging.pool.stats()["busy"] == 0
+    finally:
+        plan.close()
+
+
+@pytest.mark.parametrize(
+    "failure", ["missing_native", "budget", "allocation", "second_thread"]
+)
+def test_source_fp4_staging_unavailable_uses_bytes(tmp_path, monkeypatch, failure):
+    from types import SimpleNamespace
+
+    from omlx.custom_kernels import moe_staging
+    from omlx.patches.deepseek_v41 import moe_offload
+    from omlx.patches.deepseek_v41.language import Expert
+
+    if failure == "missing_native":
+        monkeypatch.setattr(moe_offload, "STAGING_AVAILABLE", False)
+    elif failure == "budget":
+        monkeypatch.setattr(moe_offload, "MAX_BYTES", 1)
+    config, plan = _source_fp4_plan(tmp_path)
+    prefix = "language_model.layers.0.ffn.experts"
+    if failure in ("missing_native", "budget"):
+        assert plan._staging is None
+    elif failure == "allocation":
+
+        def unavailable(_sizes):
+            raise MemoryError("simulated allocation failure")
+
+        monkeypatch.setattr(moe_staging, "_native", SimpleNamespace(Pool=unavailable))
+    try:
+        with ThreadPoolExecutor(max_workers=1) as loader:
+            disk = loader.submit(
+                OffloadedExpert, Expert(config, True), plan, prefix
+            ).result()
+        disk.slots.ensure_ids([1])
+        if failure == "second_thread":
+            assert plan._staging.owner is not None
+            reads = plan._staging.pool.stats()["reads"]
+            with ThreadPoolExecutor(max_workers=1) as caller:
+                caller.submit(disk.slots.ensure_ids, [2]).result()
+            assert plan._staging.pool.stats()["reads"] == reads
+        else:
+            disk.slots.ensure_ids([2])
+            if failure == "allocation":
+                assert plan._staging.disabled
+        assert 1 in disk.slots.slot_of and 2 in disk.slots.slot_of
+    finally:
+        plan.close()
+
+
+def test_source_fp4_staging_errors_drain_and_keep_valid_slots(tmp_path, monkeypatch):
+    from omlx.patches.deepseek_v41.language import Expert
+
+    config, plan = _source_fp4_plan(tmp_path, bad_scale_expert=6)
+    prefix = "language_model.layers.0.ffn.experts"
+    disk = OffloadedExpert(Expert(config, True), plan, prefix)
+    try:
+        disk.slots.ensure_ids([0, 1])
+        staging = plan._staging
+        original_read = staging.read
+
+        def failing_read(slab):
+            if ".3.w3.scale" in slab.key:
+                raise OSError("injected projection read failure")
+            return original_read(slab)
+
+        monkeypatch.setattr(staging, "read", failing_read)
+        with pytest.raises(OSError, match="projection read failure"):
+            disk.slots.ensure_ids([2, 3])
+        assert 2 in disk.slots.slot_of and 3 not in disk.slots.slot_of
+        monkeypatch.setattr(staging, "read", original_read)
+        disk.slots.ensure_ids([3])
+        with pytest.raises(ValueError, match="NaN E8M0 scale"):
+            disk.slots.ensure_ids([6])
+        assert 6 not in disk.slots.slot_of
+        slab = plan.slabs(prefix, "w1", 4)[0]
+        with pytest.raises((OSError, ValueError), match="short read|Truncated"):
+            staging.read(slab._replace(offset=1 << 40))
+        disk.slots.ensure_ids([4])
+        assert len(disk.slots.free) + len(disk.slots.slot_of) == plan.capacity
+    finally:
+        plan.close()
+    plan.close()
 
 
 def test_original_affine_expert_reads_repack_only_selected_experts(tmp_path):
