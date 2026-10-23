@@ -145,9 +145,10 @@ def _rope_apply(x, cos, sin, inverse):
     return mx.concatenate([x[..., :-d], rotated.reshape(*x.shape[:-1], d).astype(x.dtype)], -1)
 
 
-def rope(x, positions, config, compressed, inverse=False, quantize=False, heads_major=False):
+def rope(x, positions, config, compressed, inverse=False, quantize=False, heads_major=False, cos=None, sin=None):
     """RoPE of x [B, L, ..., D] at positions; quantize: act_quant of the result; heads_major:
-    x is [B, H, L, D] and the result [B, L, H, D]."""
+    x is [B, H, L, D] and the result [B, L, H, D]. Precomputed cos/sin skip the position
+    lookup, which lets a compiled draft block carry rope tables as ordinary array inputs."""
     params = (
         config.rope_head_dim,
         config.compress_rope_theta if compressed else config.rope_theta,
@@ -156,7 +157,8 @@ def rope(x, positions, config, compressed, inverse=False, quantize=False, heads_
         config.beta_fast,
         config.beta_slow,
     )
-    cos, sin = _rope_table(params, _rope_positions(positions))
+    if cos is None or sin is None:
+        cos, sin = _rope_table(params, _rope_positions(positions))
     if (
         mx.default_device() == mx.gpu
         and x.size

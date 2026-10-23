@@ -197,6 +197,43 @@ def test_v41_dspark_config_is_eligible():
     assert not _is_mtp_compatible({"n_mtp_layers": 0}, "deepseek_v41")
 
 
+def test_compiled_proposal_matches_plain_at_varying_width():
+    from omlx.patches.deepseek_v41.dspark import (
+        proposal_forward,
+        proposal_forward_compiled,
+    )
+    model = LanguageModel(replace(mtp_config(), dspark_block_size=5))
+    load_reference_weights(model)
+    model.configure_mtp(True, 5)
+    model.configure_mtp(True, 3)
+    c = model._config
+    raw, comp = model.make_mtp_cache(), model.make_mtp_cache()
+    context = mx.random.normal(
+        (1, c.window_size, c.dim * len(c.dspark_target_layer_ids)),
+        dtype=mx.bfloat16,
+    )
+    step = mx.random.normal(
+        (1, 1, c.dim * len(c.dspark_target_layer_ids)),
+        dtype=mx.bfloat16,
+    )
+    anchor = mx.array([[4]])
+    for cache in (raw, comp):
+        model.dspark_append_context(context, cache)
+        model.dspark_append_context(step, cache)
+        mx.eval([item.keys for item in cache if item.keys is not None])
+    mx.eval(step, anchor)
+
+    # The graph is cached per width; changing the adaptive draft length must
+    # neither retrace the advancing cache offset nor change the proposal.
+    for width in (1, 2, 3, 4, 5):
+        plain = proposal_forward(model, anchor, raw, draft_length=width)
+        compiled = proposal_forward_compiled(model, anchor, comp, draft_length=width)
+        mx.eval(plain, compiled)
+        assert all(
+            mx.array_equal(a, b).item() for a, b in zip(plain, compiled)
+        )
+
+
 def test_acceptance_depth_is_independent_of_timing():
     from omlx.patches.deepseek_v41.mtp import AcceptanceDepthController
 
