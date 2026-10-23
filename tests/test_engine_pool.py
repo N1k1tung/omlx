@@ -1280,17 +1280,18 @@ class TestVLMFallback:
             await pool._load_engine("model-a", force_lm=True)
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("model_type", ["glm5_next", "flint"])
     async def test_force_lm_keeps_vlm_engine_for_vlm_native_text_model(
-        self, small_mock_model_dir
+        self, small_mock_model_dir, model_type
     ):
-        """glm5_next has no mlx-lm class: force_lm loads the VLM engine directly
+        """Native text families have no mlx-lm class: load the VLM engine directly
         and never unloads a resident VLM engine to retry the LM load (#3959)."""
         pool = _make_pool(ceiling=10 * 1024**3)
         pool.discover_models(str(small_mock_model_dir))
         entry = pool.get_entry("model-a")
         entry.model_type = "vlm"
         entry.engine_type = "vlm"
-        entry.config_model_type = "glm5_next"
+        entry.config_model_type = model_type
 
         mock_vlm_engine = MagicMock()
         mock_vlm_engine.start = AsyncMock()
@@ -1313,15 +1314,18 @@ class TestVLMFallback:
         assert pool._force_lm_replaces_engine("model-a") is True
 
     @pytest.mark.asyncio
-    async def test_vlm_native_text_model_skips_llm_fallback(self, small_mock_model_dir):
-        """A glm5_next VLM start failure surfaces as-is instead of an LLM
+    @pytest.mark.parametrize("model_type", ["glm5_next", "flint"])
+    async def test_vlm_native_text_model_skips_llm_fallback(
+        self, small_mock_model_dir, model_type
+    ):
+        """A native text VLM start failure surfaces as-is instead of an LLM
         fallback error that can never succeed (#3956)."""
         pool = _make_pool(ceiling=10 * 1024**3)
         pool.discover_models(str(small_mock_model_dir))
         entry = pool.get_entry("model-a")
         entry.model_type = "vlm"
         entry.engine_type = "vlm"
-        entry.config_model_type = "glm5_next"
+        entry.config_model_type = model_type
 
         mock_vlm_engine = MagicMock()
         mock_vlm_engine.start = AsyncMock(side_effect=RuntimeError("bad expert table"))
@@ -1757,6 +1761,55 @@ class TestEnginePoolAsync:
         assert entry.runtime_settings_signature == pool._engine_runtime_signature(
             "model-a", ModelSettings(dflash_enabled=True)
         )
+
+    @pytest.mark.asyncio
+    async def test_minimax_bundled_dspark_is_charged_and_takes_the_mtp_depth(
+        self, pool_with_mock_engines, small_mock_model_dir
+    ):
+        pool = pool_with_mock_engines
+        pool._scheduler_config.max_num_seqs = 8
+        entry = pool.get_entry("model-a")
+        entry.config_model_type = "minimax_m3_vl"
+        draft_path = small_mock_model_dir / "model-a" / "dspark"
+        draft_path.mkdir()
+        text_config = {
+            "hidden_size": 64,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 2,
+            "head_dim": 16,
+            "num_hidden_layers": 2,
+            "sliding_window": 32,
+            "dflash_config": {"target_layer_ids": [1, 3]},
+        }
+        (draft_path / "config.json").write_text(
+            json.dumps(
+                {
+                    "architectures": ["DSparkMiniMaxDraftModel"],
+                    "text_config": text_config,
+                }
+            )
+        )
+        (draft_path / "model-dspark-00001.safetensors").write_bytes(b"0" * 1000)
+        settings = ModelSettings(mtp_enabled=True, mtp_adaptive_max_depth=3)
+        # Per window token: two layers' K/V, the projected row and two captures.
+        row_bytes = 32 * 2 * (2 * 2 * 2 * 16 + 64 + 2 * 64)
+        assert pool._entry_runtime_resident_size(
+            entry, settings
+        ) - pool._entry_runtime_resident_size(entry, ModelSettings()) == (
+            1000 + 8 * row_bytes
+        )
+
+        engine = MagicMock()
+        engine.start = AsyncMock()
+        with (
+            patch("omlx.engine_pool.BatchedEngine", return_value=engine),
+            patch("omlx.engine_pool.load_minimax_dspark_drafter") as load,
+        ):
+            await pool.get_engine("model-a", runtime_settings=settings)
+
+        assert load.call_args.args[0] == draft_path
+        assert load.call_args.args[2:] == (3, False)
+        engine.set_dflash_drafter.assert_called_once_with(load.return_value)
 
     @pytest.mark.asyncio
     async def test_dflash_drafter_failure_reuses_requested_variant_while_leased(
