@@ -322,17 +322,15 @@ class Indexer(nn.Module):
         return mx.sort(mx.where(valid, idx, -1), axis=-1)
 
 
-def _dense_attention_kv(cache, local_kv, pooled, qL):
+def _dense_attention_kv(shared, local_kv, pooled, qL):
     """Reuse BF16 cache rows across adjacent attention layers.
 
     Packed attention amortizes decoding over the queries of one call. Prefill
     runs the same compressed KV through several adjacent layers, so unpacking
-    it once per cache view instead removes that repeated full-prefix pass.
-    Local window rows change every layer and are unpacked per call; the pooled
-    rows are keyed by the live ``cache[2]`` view and released when a source
-    layer appends or truncates that view.
+    it once per source view instead removes that repeated full-prefix pass.
+    The request's per-forward shared state owns only the current pooled view;
+    local window rows change every layer and are unpacked per call.
     """
-    dense = getattr(cache, "_ds41_attention_dense", None)
     if (
         qL < 256
         or local_kv.dtype != mx.uint8
@@ -340,34 +338,25 @@ def _dense_attention_kv(cache, local_kv, pooled, qL):
         or not pooled.shape[1]
         or not attention_fast.has_symbol("packed_kv_unpack")
     ):
-        if dense is not None:
-            dense.clear()
+        shared.pop("dense_kv", None)
         return local_kv, pooled
     B = local_kv.shape[0]
     unpack_bytes = B * (local_kv.shape[2] + pooled.shape[1]) * 512 * 2
     unpack_budget = min(512 << 20, max(80 << 20, qL * 80 << 10))
     if unpack_bytes > unpack_budget:
-        if dense is not None:
-            dense.clear()
+        shared.pop("dense_kv", None)
         return local_kv, pooled
-    dense = getattr(cache, "_ds41_attention_dense", None)
-    if dense is None:
-        dense = cache._ds41_attention_dense = {}
-    key = (
-        getattr(cache, "_ds41_kv_generation", 0),
-        int(pooled.shape[1]),
-    )
-    entry = dense.get("current")
-    if entry is not None and entry[0] == key:
+    entry = shared.get("dense_kv")
+    if entry is not None and entry[0] is pooled:
         pooled_dense = entry[1]
     else:
-        # A source layer changed cache[2]; release the previous dense rows
-        # before converting this view.
-        dense.clear()
+        # Drop both references before allocating the next source's dense rows.
+        shared.pop("dense_kv", None)
+        del entry
         empty_local = mx.zeros((B, 1, 0, 528), mx.uint8)
         _, pooled_dense = attention_fast.packed_kv_unpack(empty_local, pooled)
         mx.eval(pooled_dense)
-        dense["current"] = (key, pooled_dense)
+        shared["dense_kv"] = (pooled, pooled_dense)
     local_dense, _ = attention_fast.packed_kv_unpack(
         local_kv, mx.zeros((B, 0, 288), mx.uint8)
     )
@@ -440,6 +429,7 @@ class Attention(nn.Module):
         if ratio:
             latent = None
             if layer in c.kv_source_layers:
+                shared.pop("dense_kv", None)
                 # CED: global KV projects the full encoder-final hidden state
                 # (ced_kv) even though queries only attend from the tail.
                 kv_x = x if ced_kv is None else ced_kv
@@ -479,7 +469,7 @@ class Attention(nn.Module):
             and attention_fast.has_symbol("packed_sparse_attention")
         ):
             local_kv, pooled_kv = _dense_attention_kv(
-                cache, kv[:, None], pooled, length
+                shared, kv[:, None], pooled, length
             )
             out = attention_fast.packed_sparse_attention(
                 q.transpose(0, 2, 1, 3),

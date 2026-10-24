@@ -1,12 +1,15 @@
+import weakref
+
 import mlx.core as mx
 import numpy as np
 import pytest
+from test_deepseek_v41 import load_reference_weights, tiny
 
 from omlx.custom_kernels.attention import fast
+from omlx.patches.deepseek_v41 import language
 from omlx.patches.deepseek_v41.kernels import packed_sparse_attention
 from omlx.patches.deepseek_v41.quantization import pack_activation
 from omlx.patches.deepseek_v41.language import _dense_attention_kv
-from omlx.patches.deepseek_v41.cache import DeepseekV41Cache
 
 pytestmark = pytest.mark.skipif(
     not fast.has_symbol("packed_sparse_attention"),
@@ -139,32 +142,109 @@ def test_native_dense_cache_rows_match_packed(pooled_count):
     assert mx.array_equal(packed, dense).item()
 
 
-def test_dense_attention_kv_reuses_and_invalidates_cache_view():
-    """One dense pooled copy serves adjacent layers; cache updates release it."""
+@pytest.mark.parametrize("fallback", ["short", "empty", "budget", "no_unpack"])
+def test_dense_attention_kv_reuses_and_invalidates_cache_view(fallback, monkeypatch):
+    """A new source replaces the dense view even when its shape is unchanged."""
     mx.random.seed(903)
-    length, pooled_count = 2048, 131072
+    length, pooled_count = 256, 64
     local = pack_activation(mx.random.normal((1, 128 + length, 512)))[:, None]
     pooled = pack_activation(mx.random.normal((1, pooled_count, 512)), 4, 16, True)
-    cache = DeepseekV41Cache(compress_ratio=1)
-    cache[2] = pooled
-    cache._ds41_attention_dense = {}
-    _, first = _dense_attention_kv(cache, local, pooled, length)
-    _, reused = _dense_attention_kv(cache, local, pooled, length)
+    shared = {}
+    _, first = _dense_attention_kv(shared, local, pooled, length)
+    _, reused = _dense_attention_kv(shared, local, pooled, length)
     assert reused is first
-    assert len(cache._ds41_attention_dense) == 1
 
     updated = pack_activation(
-        mx.random.normal((1, pooled_count + 1, 512)), 4, 16, True
+        mx.random.normal((1, pooled_count, 512)), 4, 16, True
     )
-    cache[2] = updated
-    cache._ds41_kv_generation = 1
-    _, replaced = _dense_attention_kv(cache, local, updated, length)
+    _, replaced = _dense_attention_kv(shared, local, updated, length)
     assert replaced is not first
-    assert len(cache._ds41_attention_dense) == 1
 
-    _, packed = _dense_attention_kv(cache, local, updated, 128)
+    ref = weakref.ref(replaced)
+    del replaced
+    if fallback == "short":
+        length = 128
+    elif fallback == "empty":
+        updated = updated[:, :0]
+    elif fallback == "budget":
+        updated = mx.broadcast_to(updated[:, :1], (1, 81920, 288))
+    else:
+        monkeypatch.setattr(fast, "has_symbol", lambda name: False)
+    local_result, packed = _dense_attention_kv(shared, local, updated, length)
+    assert local_result is local
     assert packed is updated
-    assert not cache._ds41_attention_dense
+    assert "dense_kv" not in shared
+    assert ref() is None
+
+
+@pytest.mark.parametrize("batch_size", [1, 2])
+def test_dense_attention_kv_shared_by_real_source_groups(batch_size, monkeypatch):
+    """Released encoder groups convert once each, per request and per forward."""
+    model = language.LanguageModel(tiny(
+        n_layers=20, n_heads=64, head_dim=512, rope_head_dim=32, o_groups=8,
+        window_size=128, index_topk=8, n_routed_experts=2, n_activated_experts=1,
+        compress_ratios=(0, 0) + (2,) * 18, kv_source_layers=(2, 8, 14),
+        index_source_layers=(2, 8, 14), candidate_source_layer=-1,
+    ))
+    load_reference_weights(model)
+    model.set_dtype(mx.bfloat16)
+    cache = model.make_cache()
+    real_unpack, real_dense = fast.packed_kv_unpack, language._dense_attention_kv
+    real_compress = language.Compressor.__call__
+    dense_refs, calls = [], []
+
+    def compress(self, x, cache, start):
+        assert all(ref() is None for ref in dense_refs)
+        return real_compress(self, x, cache, start)
+
+    def unpack(local, pooled, **kwargs):
+        if pooled.shape[1]:
+            # Previous layers have evaluated: the old source must be gone
+            # before allocating its replacement, including between requests.
+            assert all(ref() is None for ref in dense_refs)
+        result = real_unpack(local, pooled, **kwargs)
+        if pooled.shape[1]:
+            dense_refs.append(weakref.ref(result[1]))
+        return result
+
+    def dense(shared, local, pooled, length):
+        calls.append((id(shared), id(pooled)))
+        return real_dense(shared, local, pooled, length)
+
+    monkeypatch.setattr(fast, "packed_kv_unpack", unpack)
+    monkeypatch.setattr(language, "_dense_attention_kv", dense)
+    monkeypatch.setattr(language.Compressor, "__call__", compress)
+    chunks = [
+        (mx.arange(256)[None] + mx.arange(batch_size)[:, None] + i) % 64
+        for i in range(2)
+    ]
+    outputs = []
+    for ids in chunks:
+        output = model(ids, cache=cache)
+        mx.eval(output)
+        outputs.append(output)
+        assert len(dense_refs) == 3 * batch_size
+        assert all(ref() is None for ref in dense_refs)
+        assert len(calls) == 20 * batch_size
+        for row in range(batch_size):
+            row_calls = calls[row * 20:(row + 1) * 20]
+            assert len({owner for owner, _ in row_calls}) == 1
+            pools = [pool for _, pool in row_calls[2:]]
+            assert len(set(pools)) == 3
+            assert all(len(set(pools[i:i + 6])) == 1 for i in (0, 6, 12))
+        dense_refs.clear()
+        calls.clear()
+
+    # The same model, inputs and native attention receive packed KV instead.
+    monkeypatch.setattr(language, "_dense_attention_kv",
+                        lambda shared, local, pooled, length: (local, pooled))
+    expected_cache = model.make_cache()
+    for ids, actual in zip(chunks, outputs):
+        expected = model(ids, cache=expected_cache)
+        assert mx.array_equal(actual, expected).item()
+    for actual, expected in zip(cache, expected_cache):
+        for a, b in zip(actual.cache, expected.cache):
+            assert mx.array_equal(a, b).item()
 
 
 @pytest.mark.parametrize("scale_byte", [64, 126, 127, 128, 192])
