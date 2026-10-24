@@ -93,6 +93,7 @@ def append(cache, slot, previous, values, start):
         "idle": entry["buffer"] if keep else None,
         "valid": start if keep else 0,
     }
+    cache._ds41_kv_generation = getattr(cache, "_ds41_kv_generation", 0) + 1
     return view
 
 
@@ -102,5 +103,6 @@ def truncate(cache, slot, length):
     entry = _registry(cache).get(slot)
     if entry is not None and cache[slot] is entry["view"] and length <= entry["end"]:
         entry["view"], entry["end"] = view, length
+    cache._ds41_kv_generation = getattr(cache, "_ds41_kv_generation", 0) + 1
     cache[slot] = view
     return view
