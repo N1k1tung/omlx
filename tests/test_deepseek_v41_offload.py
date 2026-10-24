@@ -49,7 +49,7 @@ def test_packed_resident_and_prefetched_rows_match(tmp_path, monkeypatch):
             actual = disk(mx.array(ids))
         np.testing.assert_array_equal(actual.astype(mx.float32), expected)
         assert len(threads) == 1 and threads[0].startswith("v41-engram")
-        assert disk._prefetched is None and prefetch._pending is None
+        assert disk._prefetched is None and not prefetch._pending
         with prefetch.forward():
             prefetch.submit(disk, ids)
             # A mismatched request must never consume stale row data.
@@ -59,9 +59,9 @@ def test_packed_resident_and_prefetched_rows_match(tmp_path, monkeypatch):
         )
         monkeypatch.setattr(storage, "PREFETCH_BYTES", 1)
         prefetch.submit(disk, ids)
-        assert prefetch._pending is None
+        assert not prefetch._pending
         prefetch.submit(resident, ids)
-        assert prefetch._pending is None
+        assert not prefetch._pending
     finally:
         prefetch.close()
         disk.close()
@@ -98,7 +98,7 @@ def test_prefetch_drains_before_unmap(tmp_path, monkeypatch):
             release.set()
         future.result(timeout=5)
     assert disk._weights._mapping is None
-    assert prefetch._pending is None
+    assert not prefetch._pending
     prefetch.close()
     disk.close()
 
@@ -132,9 +132,9 @@ def test_wide_affine_prefetch_keeps_rows_and_enforces_bound(
         expected = read(ids)
         with prefetch.forward():
             prefetch.submit(disk, ids)
-            assert (prefetch._pending is not None) is admitted
+            assert bool(prefetch._pending) is admitted
             if admitted:
-                actual = prefetch._pending[1].result(timeout=10)
+                actual = next(iter(prefetch._pending.values()))[1].result(timeout=10)
                 np.testing.assert_array_equal(disk._prefetched[0], ids)
                 assert threads == ["v41-engram_0"]
             else:
@@ -143,7 +143,7 @@ def test_wide_affine_prefetch_keeps_rows_and_enforces_bound(
             for (got, got_dtype), (want, want_dtype) in zip(actual, expected):
                 assert got_dtype == want_dtype
                 np.testing.assert_array_equal(got, want)
-        assert prefetch._pending is None and disk._prefetched is None
+        assert not prefetch._pending and disk._prefetched is None
     finally:
         prefetch.close()
         disk.close()
@@ -156,11 +156,129 @@ def test_prefetch_forward_error_releases_pending_rows(tmp_path):
         with pytest.raises(ValueError, match="cancelled"), prefetch.forward():
             prefetch.submit(disk, np.array([1, 2]))
             raise ValueError("cancelled")
-        assert prefetch._pending is None and disk._prefetched is None
+        assert not prefetch._pending and disk._prefetched is None
         # Subsequent requests remain usable.
         with prefetch.forward():
             prefetch.submit(disk, np.array([3]))
             mx.eval(disk(mx.array([3])))
+    finally:
+        prefetch.close()
+        disk.close()
+
+
+@pytest.mark.parametrize("capacity", [1, 2])
+def test_prefetch_lookahead_is_bounded_and_replenished(tmp_path, monkeypatch, capacity):
+    tables = [table(tmp_path) for _ in range(4)]
+    ids = np.array([[1, 2, 1]])
+    size = tables[0].selected_bytes(ids.size) + ids.nbytes
+    monkeypatch.setattr(storage, "PREFETCH_BYTES", size * capacity)
+    prefetch = EngramPrefetch()
+    entered = [Event() for _ in tables]
+    release = Event()
+    for disk, event in zip(tables, entered):
+        read = disk._read_rows
+
+        def blocked(rows, read=read, event=event):
+            event.set()
+            assert release.wait(5)
+            return read(rows)
+
+        monkeypatch.setattr(disk, "_read_rows", blocked)
+    try:
+        with prefetch.forward((disk, ids) for disk in tables):
+            for event in entered[:capacity]:
+                assert event.wait(5), "future layers must start before current consumption"
+            assert not any(event.is_set() for event in entered[capacity:])
+            assert len(prefetch._pending) == capacity
+            assert prefetch._bytes == size * capacity
+            release.set()
+            for disk in tables:
+                assert disk._prefetched is not None
+                mx.eval(disk(mx.array(ids)))
+                prefetch.advance()
+                assert len(prefetch._pending) <= capacity
+                assert prefetch._bytes <= size * capacity
+        assert not prefetch._pending and prefetch._bytes == 0
+    finally:
+        release.set()
+        prefetch.close()
+        for disk in tables:
+            disk.close()
+
+
+def test_prefetch_read_failure_drains_every_layer(tmp_path, monkeypatch):
+    tables = [table(tmp_path) for _ in range(2)]
+    prefetch = EngramPrefetch()
+    entered, release, closing = Event(), Event(), Event()
+    read = tables[1]._read_rows
+
+    def failed(rows):
+        raise OSError("read failed")
+
+    def blocked(rows):
+        entered.set()
+        assert release.wait(5)
+        return read(rows)
+
+    def close():
+        closing.set()
+        prefetch.close()
+
+    monkeypatch.setattr(tables[0], "_read_rows", failed)
+    monkeypatch.setattr(tables[1], "_read_rows", blocked)
+    try:
+        for disk in tables:
+            prefetch.submit(disk, np.array([1]))
+        assert entered.wait(5)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(close)
+            try:
+                assert closing.wait(5)
+                assert not future.done()
+            finally:
+                release.set()
+            with pytest.raises(OSError, match="read failed"):
+                future.result(timeout=5)
+        assert not prefetch._pending
+        assert all(disk._prefetched is None for disk in tables)
+    finally:
+        release.set()
+        prefetch.close()
+        for disk in tables:
+            disk.close()
+
+
+@pytest.mark.parametrize("separate", [False, True])
+def test_resident_original_scales_keep_weight_reads_and_exact_bytes(tmp_path, monkeypatch, separate):
+    disk = table(tmp_path)
+    if separate:
+        disk._scales = storage.TensorFile(tmp_path / "rows.safetensors")
+    ids = np.array([[5, 1, 5, 0]])
+    expected = disk(mx.array(ids))
+    mx.eval(expected)
+    disk.make_resident(scales_only=True)
+    prefetch = EngramPrefetch()
+    reads = []
+    read = storage.TensorFile.read
+
+    def tracked(self, key, *args, **kwargs):
+        reads.append(key)
+        return read(self, key, *args, **kwargs)
+
+    monkeypatch.setattr(storage.TensorFile, "read", tracked)
+    try:
+        assert set(disk._resident) == {"s"}
+        assert disk._weights._mapping is not None
+        np.testing.assert_array_equal(disk._resident["s"][0], np.arange(32).reshape(16, 2) + 110)
+        assert disk._resident["s"][1] == "F8_E8M0"
+        with prefetch.forward([(disk, ids)]):
+            assert disk._prefetched is not None
+            actual = disk(mx.array(ids))
+        np.testing.assert_array_equal(actual.astype(mx.float32), expected.astype(mx.float32))
+        assert reads == ["w"]
+        disk.make_resident()
+        assert reads == ["w", "w"]  # The resident scales are reused.
+        assert disk._weights._mapping is None and disk._scales._mapping is None
     finally:
         prefetch.close()
         disk.close()
@@ -196,8 +314,8 @@ def test_converted_modes_match_chunked_prefill_decode_and_cleanup(converted):
             ]
             mx.eval(outputs)
             np.testing.assert_array_equal(outputs[0], outputs[1])
-            assert disk.language_model._engram_prefetch._pending is None
-            assert resident.language_model._engram_prefetch._pending is None
+            assert not disk.language_model._engram_prefetch._pending
+            assert not resident.language_model._engram_prefetch._pending
             assert all(
                 layer.engram.embed._resident is not None
                 for layer in resident.language_model.layers
@@ -213,6 +331,75 @@ def test_converted_modes_match_chunked_prefill_decode_and_cleanup(converted):
     finally:
         resident.close()
         disk.close()
+
+
+async def test_original_scales_load_and_generate_through_server(tmp_path, monkeypatch):
+    import asyncio
+    from dataclasses import asdict
+
+    from test_deepseek_v41_mtp import mtp_config
+
+    from omlx.engine.vlm import VLMBatchedEngine
+    from omlx.model_settings import ModelSettings
+    from omlx.patches import mlx_lm_mtp
+    from omlx.scheduler import SchedulerConfig
+
+    config = mtp_config(
+        engram_layer_ids=(1, 3), engram_num_embeddings=(72, 204),
+        engram_vocab_size=5, engram_max_ngram_size=4, engram_n_heads=2,
+        engram_head_dim=32, engram_compressed_vocab_size=64,
+    )
+    source, _ = write_checkpoint(tmp_path, vision=False, **asdict(config))
+    index_path = source / "model.safetensors.index.json"
+    index = json.loads(index_path.read_text())
+    tensors = {}
+    for layer, rows in zip(config.engram_layer_ids, config.engram_num_embeddings):
+        prefix = f"layers.{layer}.engram.embed."
+        tensors[prefix + "weight"] = (np.arange(rows * 32, dtype=np.uint8).reshape(rows, 32) % 80, "F8_E4M3")
+        tensors[prefix + "scale"] = (np.full((rows, 1), 120, np.uint8), "F8_E8M0")
+        index["weight_map"].update({prefix + k: "engram.safetensors" for k in ("weight", "scale")})
+    raw_safetensors(source / "engram.safetensors", tensors)
+    index_path.write_text(json.dumps(index))
+    target = tmp_path / "converted"
+    convert(source, target, preserve_mtp=True)
+    estimate = deepseek_v41_residency_estimate(target)
+    # Remove only the scale tensors from the metadata to check their admission cost.
+    raw_config = json.loads((target / "config.json").read_text())
+    specs = raw_config["omlx_deepseek_v41"]["engram_tables"]
+    scale_bytes = sum(value[0].nbytes for key, value in tensors.items() if key.endswith(".scale"))
+    for spec in specs.values():
+        spec.pop("scale_key")
+    (target / "config.json").write_text(json.dumps(raw_config))
+    without_scales = deepseek_v41_residency_estimate(target)
+    assert abs((estimate.mmap_bytes - without_scales.mmap_bytes) - scale_bytes * 1.05) <= 1
+    # Restore only the fixture metadata before loading; the source files never change.
+    for module, spec in specs.items():
+        spec["scale_key"] = spec["weight_key"].removesuffix(".weight") + ".scale"
+    (target / "config.json").write_text(json.dumps(raw_config))
+
+    # Engine setup changes process-wide defaults for subsequently loaded models.
+    for name in ("_MTP_ACTIVE", "_MTP_DEPTH", "_MTP_DEPTH_FIXED"):
+        monkeypatch.setattr(mlx_lm_mtp, name, getattr(mlx_lm_mtp, name))
+    engine = VLMBatchedEngine(
+        str(target), enable_thinking=False,
+        scheduler_config=SchedulerConfig(prefill_step_size=4),
+        model_settings=ModelSettings(mtp_enabled=True, mtp_adaptive_max_depth=3,
+                                     deepseek_v41_engram_ssd_offload=True),
+    )
+    try:
+        await engine.start()
+        lm = engine.vlm_model.language_model
+        for layer in config.engram_layer_ids:
+            embed = lm.layers[layer].engram.embed
+            assert set(embed._resident) == {embed._scale_key}
+            assert embed._weights._mapping is not None
+        for prompt in ([3, 4, 5, 6, 7, 8, 9], [10, 11, 12, 13, 14]):
+            result = await asyncio.wait_for(engine.generate(prompt, max_tokens=12, temperature=0), 30)
+            assert result.finished and result.finish_reason in ("stop", "length"), result
+            assert not lm._engram_prefetch._pending
+        assert getattr(lm, "_omlx_dspark_proposal_compiled", None) is not None
+    finally:
+        await engine.stop()
 
 
 def test_residency_counts_indexed_tensors_not_linked_shard_bytes(converted):
@@ -386,12 +573,12 @@ def test_model_close_releases_all_resources_after_cleanup_error(
     try:
         # Start the real worker and retain a completed pending read to drain.
         prefetch.submit(tables[0], np.array([1]))
-        prefetch._pending[1].result(timeout=5)
+        next(iter(prefetch._pending.values()))[1].result(timeout=5)
         with pytest.raises(OSError) as raised:
             model.close()
         assert raised.value is errors[failures[0]]
         assert closed == ["offload", "prefetch", "table0", "table1"]
-        assert prefetch._closed and prefetch._pending is None
+        assert prefetch._closed and not prefetch._pending
         assert all(not thread.is_alive() for thread in prefetch._executor._threads)
         for table in tables:
             assert table._closed and table._prefetched is None

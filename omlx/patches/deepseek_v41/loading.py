@@ -187,7 +187,7 @@ def load(
     memory_scope = ExitStack()
     offload = None
     try:
-        if not engram_ssd_offload and config.engram_layer_ids:
+        if config.engram_layer_ids:
             # Include packed Engram storage in the normal MLX residency budget
             # during loading, before BatchGenerator takes ownership.
             memory_scope.enter_context(wired_limit(model))
@@ -415,11 +415,15 @@ def load(
         if model.config.engram_layer_ids:
             model.language_model.set_tokenizer(tokenizer)
         # Load the backbone before reserving RAM for large Engram tables.
-        if not engram_ssd_offload:
-            for layer in model.language_model.pipeline_layers:
-                if "engram" in layer and isinstance(
-                    layer.engram.embed, DiskEngramEmbedding
-                ):
+        for layer in model.language_model.pipeline_layers:
+            if "engram" in layer and isinstance(
+                layer.engram.embed, DiskEngramEmbedding
+            ):
+                if engram_ssd_offload:
+                    # Original E8M0 scales cost 1/32 of the FP8 weights and
+                    # avoid a second random SSD gather for every lookup.
+                    layer.engram.embed.make_resident(scales_only=True)
+                else:
                     layer.engram.embed.make_resident()
         mx.eval(model.parameters())
         model.eval()

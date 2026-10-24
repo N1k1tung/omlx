@@ -89,7 +89,7 @@ def build(seed=4121, fmt="mxfp", **overrides):
         packed, scales = mx.quantize(weight.astype(mx.bfloat16), group_size=32, bits=bits, mode=mode)[:2]
         return QuantizedProjection(packed, scales, bits, mode)
 
-    for layer in model.layers:
+    for layer in [*model.layers, *getattr(model, "mtp", ())]:
         att, ffn = layer.attn, layer.ffn
         for name in ("wq_a", "wkv", "wq_b", "wo_b"):
             role = name
@@ -111,6 +111,39 @@ def verify_exact(model):
     for layer in model.layers:
         object.__setattr__(layer, "_omlx_verify_exact", True)
     return model
+
+
+@pytest.mark.parametrize("dtype,storage_dtype", [(mx.bfloat16, mx.bfloat16), (mx.float32, mx.bfloat16), (mx.bfloat16, mx.float32), (mx.float32, mx.float32)])
+@pytest.mark.parametrize("quantize_input", [False, True])
+@pytest.mark.parametrize("mode,bits", [("affine", 8), ("affine", 4), ("mxfp8", 8)])
+def test_verifier_projections_keep_single_row_arithmetic(monkeypatch, dtype, storage_dtype, quantize_input, mode, bits):
+    from omlx.patches.deepseek_v4 import verify_qmv
+
+    mx.random.seed(735)
+    packed, scales, *biases = mx.quantize(
+        mx.random.normal((512, 1280), dtype=storage_dtype), bits=bits,
+        group_size=64 if mode == "affine" else 32, mode=mode,
+    )
+    p = QuantizedProjection(packed, scales, bits, mode,
+                            biases=biases[0] if biases else None,
+                            group_size=64 if mode == "affine" else 32,
+                            quantize_input=quantize_input)
+    called = []
+    exact = verify_qmv.exact_rows_qmv
+
+    def tracked(x, *args, **kwargs):
+        called.append(x.dtype)
+        return exact(x, *args, **kwargs)
+
+    monkeypatch.setattr(verify_qmv, "exact_rows_qmv", tracked)
+    for rows in (1, 2, 4, 6):
+        x = mx.random.normal((1, rows, p.input_dims), dtype=dtype)
+        expected = mx.concatenate([p(x[:, i:i+1]) for i in range(rows)], 1)
+        actual = decode_fused._rows(p, x)
+        assert actual.dtype == expected.dtype
+        assert mx.array_equal(actual, expected).item()
+    eligible = (mode, bits) == ("affine", 8) and (dtype == storage_dtype or dtype == mx.float32)
+    assert called == ([dtype] * 3 if eligible else [])
 
 
 @pytest.mark.parametrize("fmt,tiles", [("mxfp", False), ("affine", False), ("affine", True)])
@@ -163,10 +196,15 @@ def test_fused_decode_matches_unfused_block(monkeypatch, fmt, tiles):
 
 
 def test_fused_decode_rejects_unsupported_layouts():
+    from omlx.patches.deepseek_v41 import decode_moe
+
     model = build()
     c = model._config
     layer = model.layers[1]
     assert decode_fused.supported(layer, c)
+    x = mx.zeros((1, c.dim), mx.bfloat16)
+    assert not decode_moe.supported(layer.ffn, x, replace(c, norm_topk_prob=False))
+    assert not decode_moe.supported(layer.ffn, x, replace(c, n_activated_experts=1))
     att = model.layers[2].attn
     packed, scales = mx.quantize(
         mx.dequantize(att.wq_b.weight, att.wq_b.scales, None, group_size=32, bits=8, mode="mxfp8", dtype=mx.bfloat16),
@@ -632,7 +670,9 @@ def test_mtp_generation_matches_greedy_with_fused_kernels(monkeypatch, fmt):
     token (verify blocks are token-exact, rejected drafts roll back exactly)."""
     from mlx_lm.generate import BatchGenerator
 
+    from omlx.patches.deepseek_v41 import decode_moe
     from omlx.patches.mlx_lm_mtp import batch_generator
+    from omlx.utils.sampling import make_sampler
 
     batch_generator.apply()
     model = build(
@@ -645,6 +685,20 @@ def test_mtp_generation_matches_greedy_with_fused_kernels(monkeypatch, fmt):
         dspark_target_layer_ids=(2, 3, 4),
         dspark_markov_rank=32,
     )
+    if fmt == "affine":
+        # oQ2e stores compressor/indexer projections as affine8 too. Keep
+        # compressor input quantization disabled, including its FP32 branch.
+        for layer in model.layers:
+            for owner, names in (
+                (getattr(layer.attn, "compressor", None), ("wkv", "wgate")),
+                (getattr(layer.attn, "indexer", None), ("wq_b", "wk", "weights_proj")),
+            ):
+                for name in names:
+                    projection = getattr(owner, name, None)
+                    if projection is not None:
+                        packed, scales, biases = mx.quantize(projection.weight.astype(mx.bfloat16), bits=8, group_size=64)
+                        setattr(owner, name, QuantizedProjection(packed, scales, 8, "affine", biases=biases,
+                                                                group_size=64, quantize_input=name == "wq_b"))
     prompt = [3, 4, 5, 6, 7, 8, 9, 10, 11]
     model.configure_mtp(True, 3)
     expected, cache = [], model.make_cache()
@@ -664,7 +718,26 @@ def test_mtp_generation_matches_greedy_with_fused_kernels(monkeypatch, fmt):
         return real(*args, **kwargs)
 
     monkeypatch.setattr(decode_fused, "decode_block_verify", counted)
-    generator = BatchGenerator(model, max_tokens=24, prefill_step_size=4, sampler=lambda logits: mx.argmax(logits, -1))
+    draft_calls = []
+    real_moe = decode_moe.fused_decode_moe_nb
+
+    def counted_moe(moe, x, *args, **kwargs):
+        if any(moe is stage.ffn for stage in model.mtp):
+            draft_calls.append(x.shape[0])
+        return real_moe(moe, x, *args, **kwargs)
+
+    monkeypatch.setattr(decode_moe, "fused_decode_moe_nb", counted_moe)
+    from omlx.patches.deepseek_v4 import verify_qmv
+
+    projection_calls = []
+    exact = verify_qmv.exact_rows_qmv
+
+    def counted_projection(x, *args, **kwargs):
+        projection_calls.append(x.dtype)
+        return exact(x, *args, **kwargs)
+
+    monkeypatch.setattr(verify_qmv, "exact_rows_qmv", counted_projection)
+    generator = BatchGenerator(model, max_tokens=24, prefill_step_size=4, sampler=make_sampler(temp=0))
     result = []
     try:
         generator.insert([prompt])
@@ -676,6 +749,9 @@ def test_mtp_generation_matches_greedy_with_fused_kernels(monkeypatch, fmt):
     finally:
         generator.close()
     assert calls and max(calls) > 1, "verify blocks must take the fused path"
+    assert draft_calls, "quantized DSpark stages must take the fused MoE path"
+    if fmt == "affine":
+        assert mx.float32 in projection_calls
     assert result[:24] == expected
 
 

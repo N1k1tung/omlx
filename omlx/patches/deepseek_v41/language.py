@@ -1040,12 +1040,6 @@ class LanguageModel(DSparkMixin, PipelineMixin, nn.Module):
         """(global layer id, block) for the layers this rank holds."""
         return list(enumerate(self.pipeline_layers, self.start_idx))
 
-    def _next_engram(self, stage, layer_id):
-        """The first Engram block after ``layer_id`` in this stage, or None."""
-        return next(
-            (i for i, layer in stage if i > layer_id and "engram" in layer), None
-        )
-
     def _stage_output(self, h, pre, skip_logits):
         """Hand the stage to the next rank, then logits from rank 0's hidden."""
         if self.pipeline_rank != 0:
@@ -1125,24 +1119,19 @@ class LanguageModel(DSparkMixin, PipelineMixin, nn.Module):
         engram_ids = list(c.engram_layer_ids)
         stage = self._stage()
         prefetch = getattr(self, "_engram_prefetch", None)
-        with prefetch.forward() if prefetch is not None else nullcontext():
-            first = self._next_engram(stage, -1)
-            if prefetch is not None and first is not None:
-                prefetch.submit(
-                    self.layers[first].engram.embed, hashes[:, :, engram_ids.index(first)]
-                )
+        lookups = (
+            (layer.engram.embed, hashes[:, :, engram_ids.index(i)])
+            for i, layer in stage if "engram" in layer
+        )
+        with prefetch.forward(lookups) if prefetch is not None else nullcontext():
             for j, (i, layer) in enumerate(stage):
                 if "engram" in layer:
                     ix = engram_ids.index(i)
                     if prefetch is not None:
                         mx.async_eval(h, pre)
                     h = layer.engram(h, hashes[:, :, ix], None)
-                    following = self._next_engram(stage, i)
-                    if prefetch is not None and following is not None:
-                        prefetch.submit(
-                            self.layers[following].engram.embed,
-                            hashes[:, :, engram_ids.index(following)],
-                        )
+                    if prefetch is not None:
+                        prefetch.advance()
                 h, pre = decode_fused.decode_block_nb(
                     layer, h, pre, [rcs[r][j] for r in range(b_n)], shareds, starts, c
                 )
@@ -1278,25 +1267,19 @@ class LanguageModel(DSparkMixin, PipelineMixin, nn.Module):
             # CED tail and 2047/2048 chunk widths, so size classes never
             # reuse). Decode/verify widths are only submitted (async_eval).
             prefill_backpressure = end - begin >= 256
-            with prefetch.forward() if prefetch is not None else nullcontext():
-                first = self._next_engram(stage, -1)
-                if prefetch is not None and first is not None:
-                    prefetch.submit(
-                        self.layers[first].engram.embed,
-                        hashes[:, :, engram_ids.index(first)],
-                    )
+            lookups = (
+                (layer.engram.embed, hashes[:, :, engram_ids.index(i)])
+                for i, layer in stage if "engram" in layer
+            )
+            with prefetch.forward(lookups) if prefetch is not None else nullcontext():
                 for j, (i, layer) in enumerate(stage):
                     if "engram" in layer:
                         ix = engram_ids.index(i)
                         if prefetch is not None:
                             mx.async_eval(h, pre)
                         h = layer.engram(h, hashes[:, :, ix], image_mask)
-                        following = self._next_engram(stage, i)
-                        if prefetch is not None and following is not None:
-                            prefetch.submit(
-                                self.layers[following].engram.embed,
-                                hashes[:, :, engram_ids.index(following)],
-                            )
+                        if prefetch is not None:
+                            prefetch.advance()
                     if capture and i in c.dspark_target_layer_ids:
                         captured[i] = mx.mean(h, axis=2)
                     query_start = start

@@ -83,7 +83,7 @@ def _estimate(model_path, signature):
             raise ValueError("Invalid Engram tensor offsets")
         return end - start
 
-    base, engram = 0, 0
+    base, engram, resident_scales = 0, 0, 0
     if spec is not None:
         tables = spec.get("engram_tables", {})
         if not tables:
@@ -102,9 +102,12 @@ def _estimate(model_path, signature):
         for table in tables.values():
             engram += tensor_bytes(table["weight_file"], table["weight_key"])
             if table.get("scale_key"):
-                engram += tensor_bytes(
-                    table.get("scale_file") or table["weight_file"], table["scale_key"]
-                )
+                filename = table.get("scale_file") or table["weight_file"]
+                key = table["scale_key"]
+                size = tensor_bytes(filename, key)
+                engram += size
+                if entry(filename, key)["dtype"].startswith("F8_E8M0"):
+                    resident_scales += size
             if table.get("bias_key"):
                 engram += tensor_bytes(
                     table.get("scale_file") or table["weight_file"], table["bias_key"]
@@ -118,6 +121,8 @@ def _estimate(model_path, signature):
             size = tensor_bytes(filename, key)
             if ".engram.embed." in key:
                 engram += size
+                if key.endswith(".scale") and entry(filename, key)["dtype"].startswith("F8_E8M0"):
+                    resident_scales += size
                 continue
             weight_key = (
                 key.removesuffix(".scale") + ".weight"
@@ -143,6 +148,7 @@ def _estimate(model_path, signature):
     return EngramResidencyEstimate(
         engram > 0,
         int((base + engram) * 1.05),
-        int(base * 1.05) + 32 * 1024 * 1024,
+        # Scales remain resident in SSD mode; packed lookahead is capped at 64 MiB.
+        int((base + resident_scales) * 1.05) + 64 * 1024 * 1024,
         engram,
     )

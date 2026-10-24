@@ -73,6 +73,12 @@ class DSparkMixin:
         return self.make_dspark_cache()
 
     def dspark_append_context(self, main_hidden, cache, *, start_offset=None):
+        from .dspark import append_context_compiled
+
+        # Prefill keeps its existing graph; only the few newly committed rows
+        # recur at decode time. Array RoPE inputs avoid retracing each position.
+        if 1 <= main_hidden.shape[1] <= 8:
+            return append_context_compiled(self, main_hidden, cache, start_offset)
         first = self.mtp[0]
         projected = first.main_norm(first.main_proj(main_hidden))
         for stage, item in zip(self.mtp, cache):

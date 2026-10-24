@@ -394,7 +394,7 @@ def test_unified_index_engram_and_mixed_shard_offload(tmp_path, monkeypatch):
     assert before.engram_bytes == report["engram"]["tensor_bytes"]
     assert (
         before.mmap_bytes
-        == int(report["remaining_weights"]["tensor_bytes"] * 1.05) + 32 * 1024**2
+        == int(report["remaining_weights"]["tensor_bytes"] * 1.05) + 64 * 1024**2
     )
 
     # Put one lookup table and normal weights in the same small fixture shard.

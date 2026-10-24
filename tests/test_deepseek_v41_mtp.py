@@ -234,6 +234,25 @@ def test_compiled_proposal_matches_plain_at_varying_width():
         )
 
 
+def test_compiled_context_matches_plain_across_positions_and_widths():
+    model = LanguageModel(mtp_config())
+    load_reference_weights(model)
+    raw, compiled = model.make_mtp_cache(), model.make_mtp_cache()
+    c = model._config
+    offset = 131069
+    for width in (1, 3, 2, 5, 1, 9, 4):
+        hidden = mx.random.normal((1, width, c.dim * len(c.dspark_target_layer_ids)))
+        first = model.mtp[0]
+        projected = first.main_norm(first.main_proj(hidden))
+        for stage, cache in zip(model.mtp, raw):
+            stage.attn.append_context(projected, cache, start_offset=offset)
+        model.dspark_append_context(hidden, compiled, start_offset=offset)
+        offset += width
+        for a, b in zip(raw, compiled):
+            assert a.offset == b.offset == offset
+            np.testing.assert_array_equal(a.keys, b.keys)
+
+
 def test_acceptance_depth_is_independent_of_timing():
     from omlx.patches.deepseek_v41.mtp import AcceptanceDepthController
 

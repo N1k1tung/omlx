@@ -12,6 +12,7 @@ import mlx.core as mx
 import mlx.nn as nn
 
 from ..mlx_lm_mtp.deepseek_v4_dspark import DSparkContextCache
+from . import decode_fused, decode_moe
 from .head import project_logits
 from .language import (
     Attention,
@@ -28,14 +29,15 @@ from .quantization import quantize_activation
 
 
 class DSparkAttention(Attention):
+    def context_keys(self, main_x, positions=None, *, cos=None, sin=None):
+        return quantize_activation(
+            rope(self.kv_norm(self.wkv(main_x)), positions, self._config, False, cos=cos, sin=sin)
+        )[:, None]
+
     def append_context(self, main_x, cache, *, start_offset=None):
-        c = self._config
         start = cache.offset if start_offset is None else start_offset
         positions = range(start, start + main_x.shape[1])
-        kv = quantize_activation(
-            rope(self.kv_norm(self.wkv(main_x)), positions, c, False)
-        )
-        cache.append(kv[:, None], start_offset=start_offset)
+        cache.append(self.context_keys(main_x, positions), start_offset=start_offset)
 
     def __call__(self, x, cache):
         batch, length, _ = x.shape
@@ -135,7 +137,18 @@ class DSparkBlock(Block):
         fp, fo, fc = hc_mixes(
             h, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base, self._config
         )
-        h = hc_post(self.ffn(self.ffn_norm(hc_pre(h, ap)), None), h, fo, fc)
+        x = self.ffn_norm(hc_pre(h, ap))
+        flat = x.reshape(-1, self._config.dim)
+        if (
+            mx.default_device() == mx.gpu
+            and 1 <= flat.shape[0] <= decode_fused.MAX_BATCH
+            and decode_moe.supported(self.ffn, flat[:1], self._config)
+        ):
+            f = decode_moe.fused_decode_moe_nb(self.ffn, flat, self._config)[0]
+            f = f.reshape(x.shape)
+        else:
+            f = self.ffn(x, None)
+        h = hc_post(f, h, fo, fc)
         return h, fp
 
 
@@ -153,6 +166,27 @@ def make_stages(c):
 
 def make_cache(c):
     return [DSparkContextCache(c.window_size) for _ in range(c.n_mtp_layers)]
+
+
+def append_context_compiled(model, main_hidden, cache, start_offset):
+    """Project short committed prefixes with positions supplied as arrays."""
+    c = model._config
+    start = cache[0].offset if start_offset is None else start_offset
+    cos, sin = _rope_table(
+        (c.rope_head_dim, c.rope_theta, 0, c.rope_factor, c.beta_fast, c.beta_slow),
+        _rope_positions(range(start, start + main_hidden.shape[1])),
+    )
+    compiled = getattr(model, "_omlx_dspark_context_compiled", None)
+    if compiled is None:
+        def body(hidden, cos, sin):
+            first = model.mtp[0]
+            projected = first.main_norm(first.main_proj(hidden))
+            return tuple(stage.attn.context_keys(projected, cos=cos, sin=sin) for stage in model.mtp)
+
+        compiled = mx.compile(body)
+        object.__setattr__(model, "_omlx_dspark_context_compiled", compiled)
+    for item, keys in zip(cache, compiled(main_hidden, cos, sin)):
+        item.append(keys, start_offset=start)
 
 
 def forward_spec(model, input_ids, main_hidden, cache, *, temperature=0.0):

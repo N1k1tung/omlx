@@ -318,26 +318,29 @@ class DiskEngramEmbedding(nn.Module):
         self._resident = None
         self._prefetched = None
 
-    def make_resident(self):
+    def make_resident(self, *, scales_only=False):
         """Keep packed tensors in Metal-managed RAM with shared CPU views."""
         with self._lock:
-            resident = {
-                self._weight_key: self._weights.read(
-                    self._weight_key, metal_backed=True
-                ),
-            }
-            if self._scale_key is not None:
-                resident[self._scale_key] = self._scales.read(
-                    self._scale_key, metal_backed=True
-                )
-            if self._bias_key is not None:
-                resident[self._bias_key] = self._scales.read(
-                    self._bias_key, metal_backed=True
-                )
+            if self._closed:
+                raise RuntimeError("Engram embedding is closed")
+            if scales_only and (
+                self._scale_key is None
+                or not self._scales.header[self._scale_key]["dtype"].startswith("F8_E8M0")
+            ):
+                return
+            resident = dict(self._resident or {})
+            for reader, key in (
+                (self._weights, None if scales_only else self._weight_key),
+                (self._scales, self._scale_key),
+                (self._scales, None if scales_only else self._bias_key),
+            ):
+                if key is not None and key not in resident:
+                    resident[key] = reader.read(key, metal_backed=True)
             self._resident = resident
-            self._weights.close()
-            if self._scales is not self._weights:
-                self._scales.close()
+            if not scales_only:
+                self._weights.close()
+                if self._scales is not self._weights:
+                    self._scales.close()
 
     def selected_bytes(self, rows):
         total = 0
@@ -364,7 +367,7 @@ class DiskEngramEmbedding(nn.Module):
             ):
                 if key is None:
                     continue
-                if self._resident is None:
+                if self._resident is None or key not in self._resident:
                     result.append(reader.read(key, host.reshape(-1)))
                 else:
                     raw, dtype = self._resident[key]
@@ -410,45 +413,78 @@ class DiskEngramEmbedding(nn.Module):
                 self._scales.close()
 
 
-# Include packed rows and their IDs for wider prefill chunks. Only one read
-# remains pending per model; larger gathers still use the synchronous path.
+# Bound packed rows and IDs across the whole lookahead, including completed
+# reads waiting for their layer. Oversized gathers use the synchronous path.
 PREFETCH_BYTES = 64 * 1024 * 1024
+PREFETCH_LAYERS = 2
 
 
 class EngramPrefetch:
-    """One pending CPU read per model, drained at each forward boundary."""
+    """Byte-bounded CPU lookahead, owned and drained by one forward."""
 
     def __init__(self):
         self._executor = ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="v41-engram"
+            max_workers=PREFETCH_LAYERS, thread_name_prefix="v41-engram"
         )
-        self._pending = None
+        self._pending = {}
+        self._bytes = 0
+        self._requests = iter(())
+        self._next = None
         self._closed = False
 
     def submit(self, embed, ids):
-        self.drain()
         if self._closed:
             raise RuntimeError("Engram prefetch is closed")
-        if not isinstance(embed, DiskEngramEmbedding) or embed._resident is not None:
-            return
+        if not isinstance(embed, DiskEngramEmbedding) or (
+            embed._resident is not None and embed._weight_key in embed._resident
+        ):
+            return True
+        if id(embed) in self._pending:
+            raise ValueError("Engram layer already has a pending read")
+        size = embed.selected_bytes(ids.size) + ids.size * 8
+        if size > PREFETCH_BYTES:
+            return True
+        if len(self._pending) >= PREFETCH_LAYERS or self._bytes + size > PREFETCH_BYTES:
+            return False
         host = np.asarray(ids, dtype=np.int64).copy()
-        if embed.selected_bytes(host.size) + host.nbytes > PREFETCH_BYTES:
-            return
         future = self._executor.submit(embed._read_rows, host)
         embed._prefetched = (host, future)
-        self._pending = (embed, future)
+        self._pending[id(embed)] = (embed, future, size)
+        self._bytes += size
+        return True
+
+    def advance(self):
+        """Release consumed results and refill without waiting on future layers."""
+        for key, (embed, future, size) in list(self._pending.items()):
+            if embed._prefetched is None:
+                future.result()
+                del self._pending[key]
+                self._bytes -= size
+        while True:
+            if self._next is None:
+                self._next = next(self._requests, None)
+            if self._next is None or not self.submit(*self._next):
+                break
+            self._next = None
 
     def drain(self):
-        pending, self._pending = self._pending, None
-        if pending is not None:
-            embed, future = pending
+        pending, self._pending = self._pending, {}
+        self._bytes = 0
+        self._requests, self._next = iter(()), None
+        for embed, future, _ in pending.values():
             embed._prefetched = None
-            if not future.cancel():
+            future.cancel()
+        # A failed read must not skip draining other layers before unmapping.
+        wait([future for _, future, _ in pending.values()])
+        for _, future, _ in pending.values():
+            if not future.cancelled():
                 future.result()
 
     @contextmanager
-    def forward(self):
+    def forward(self, requests=()):
         try:
+            self._requests = iter(requests)
+            self.advance()
             yield self
         finally:
             self.drain()
