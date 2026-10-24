@@ -3,6 +3,7 @@
 #include "mlx/array.h"
 #include "mlx/stream.h"
 #include "mlx/utils.h"
+#include <tuple>
 
 namespace mx = mlx::core;
 
@@ -18,6 +19,11 @@ mx::array packed_sparse_attention(
     int q_offset,
     int compress_ratio,
     int local_window,
+    mx::StreamOrDevice s = {});
+
+std::tuple<mx::array, mx::array> packed_kv_unpack(
+    const mx::array& local_kv,
+    const mx::array& pooled,
     mx::StreamOrDevice s = {});
 
 } // namespace omlx::attention

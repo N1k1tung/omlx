@@ -11,7 +11,11 @@ from omlx.patches.deepseek_v41.kernels import (
     packed_sparse_attention,
 )
 from omlx.patches.deepseek_v41.language import candidate_block_ids, sparse_attention
-from omlx.patches.deepseek_v41.quantization import pack_activation, unpack_activation
+from omlx.patches.deepseek_v41.quantization import (
+    pack_activation,
+    quantize_activation,
+    unpack_activation,
+)
 
 
 @pytest.mark.parametrize("dtype", [mx.float32, mx.float16, mx.bfloat16])
@@ -607,3 +611,36 @@ def test_deep_prefill_index_selection_matches_full_scores():
     actual, blocks = kernels.packed_index_topk(q, keys, weights, start, ratio, 512)
     np.testing.assert_array_equal(actual, expected)
     assert blocks.shape == (1, length, 0)
+
+
+@pytest.mark.parametrize("ratio,tied,width,length", [
+    (1, False, 4103, 37), (2, False, 4103, 37), (2, True, 4103, 37),
+    (1, False, 65539, 257),  # More than one 64 MiB score group.
+])
+def test_deep_prefill_candidate_source_matches_full_scores(monkeypatch, ratio, tied, width, length):
+    """Radix source selection shares scores with exact candidate-block selection."""
+    mx.random.seed(7103)
+    start = (width - 7) * ratio - 1
+    q = quantize_activation(mx.random.normal((1, length, 32, 128)).astype(mx.bfloat16), bits=4)
+    keys = pack_activation(mx.random.normal((1, width, 128)).astype(mx.bfloat16), 4)
+    weights = mx.zeros((1, length, 32)) if tied else mx.random.normal((1, length, 32))
+    scores = packed_index_scores(q, keys, weights, start, ratio)
+    order = mx.argsort(-scores, axis=-1)[..., :512].astype(mx.int32)
+    valid = mx.take_along_axis(scores, order, -1) > -float("inf")
+    expected = mx.sort(mx.where(valid, order, -1), -1)
+    lengths = (mx.arange(start + 1, start + length + 1) // ratio)[None, :, None]
+    expected_blocks = mx.sort(candidate_block_ids(scores, lengths, 512, 8), -1)
+    calls = []
+    original = kernels._radix_topk
+
+    def tracked(scores, count):
+        calls.append(scores.nbytes)
+        return original(scores, count)
+
+    monkeypatch.setattr(kernels, "_radix_topk", tracked)
+    actual, blocks = kernels.packed_index_topk(
+        q, keys, weights, start, ratio, 512, block_count=512, block_size=8
+    )
+    assert calls and max(calls) <= 64 << 20
+    np.testing.assert_array_equal(actual, expected)
+    np.testing.assert_array_equal(blocks, expected_blocks)

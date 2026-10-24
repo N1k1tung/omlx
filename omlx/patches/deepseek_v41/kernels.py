@@ -1024,11 +1024,11 @@ def index_select(scores, count, candidates=None):
     )[0]
 
 
-def _radix_index_topk(q, keys, weights, start, ratio, count):
+def _radix_index_topk(q, keys, weights, start, ratio, count, block_count=0, block_size=0):
     """Score bounded query groups, then select with the radix kernel."""
     # At most 64 MiB of FP32 scores per group.
     group = min(1024, max(1, (64 << 20) // (4 * keys.shape[1])))
-    results, pending = [], None
+    results, block_results, pending = [], [], ()
     for begin in range(0, q.shape[1], group):
         end = min(begin + group, q.shape[1])
         scores = packed_index_scores(
@@ -1037,15 +1037,24 @@ def _radix_index_topk(q, keys, weights, start, ratio, count):
         ids = _radix_topk(scores, count)
         valid = mx.take_along_axis(scores, ids, -1) > -float("inf")
         ids = mx.sort(mx.where(valid, ids, -1), axis=-1)
+        if block_count:
+            values, blocks = _tile_topk(
+                scores, block_count, block_size=block_size, force_latest=True,
+                start=start + begin, ratio=ratio,
+            )
+            blocks = mx.sort(mx.where(values > -float("inf"), blocks, -1), axis=-1)
+        else:
+            blocks = mx.zeros((1, end - begin, 0), mx.int32)
         # Build the next group while this one runs; keep one group in flight.
-        if pending is not None:
-            mx.eval(pending)
-        mx.async_eval(ids)
-        pending = ids
+        if pending:
+            mx.eval(*pending)
+        pending = (ids, blocks)
+        mx.async_eval(*pending)
         results.append(ids)
-    if pending is not None:
-        mx.eval(pending)
-    return mx.concatenate(results, 1)
+        block_results.append(blocks)
+    if pending:
+        mx.eval(*pending)
+    return mx.concatenate(results, 1), mx.concatenate(block_results, 1)
 
 
 def packed_index_topk(
@@ -1090,12 +1099,17 @@ def packed_index_topk(
     width = keys.shape[1]
     count = min(count, width)
     visible = min(width, (start + q.shape[1]) // ratio)
-    if q.shape[1] > 8 and not block_count and visible >= max(_RADIX_MIN_KEYS, count):
-        ids = _radix_index_topk(q, keys[:, :visible], weights, start, ratio, count)
-        return ids, mx.zeros((1, q.shape[1], 0), mx.int32)
     if block_count:
         block_count = min(block_count, (width + block_size - 1) // block_size)
         chunk_size = max(block_size, chunk_size // block_size * block_size)
+    if q.shape[1] > 8 and count and block_count <= 2048 and visible >= max(
+        _RADIX_MIN_KEYS, count, block_count * block_size
+    ):
+        # Candidate-source layers share the same bounded score scan. Only
+        # block maxima need tile sorting; sorting every source key is wasted.
+        return _radix_index_topk(
+            q, keys[:, :visible], weights, start, ratio, count, block_count, block_size
+        )
     results, block_results = [], []
     batch_chunks = 1 if q.shape[1] == 1 else 2
     pending = ()

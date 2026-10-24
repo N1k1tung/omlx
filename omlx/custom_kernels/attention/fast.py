@@ -144,6 +144,22 @@ def packed_sparse_attention(
     raise RuntimeError("packed_sparse_attention native kernel is unavailable")
 
 
+def packed_kv_unpack(
+    local_kv: mx.array,
+    pooled: mx.array,
+    *,
+    stream=None,
+) -> tuple[mx.array, mx.array]:
+    """Convert packed cache rows to BF16 once, for reuse across layers."""
+    if _ext is not None and hasattr(_ext, "packed_kv_unpack"):
+        return _ext.packed_kv_unpack(
+            local_kv,
+            pooled,
+            **_native_stream_kwargs(stream),
+        )
+    raise RuntimeError("packed_kv_unpack native kernel is unavailable")
+
+
 def sparse_gqa_attention(
     queries: mx.array,
     keys: mx.array,
