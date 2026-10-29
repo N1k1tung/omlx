@@ -227,7 +227,7 @@ def converted(tmp_path):
 
 @pytest.mark.parametrize("source_checkpoint", [False, True])
 @pytest.mark.parametrize("scale_dtype", ["F8_E8M0", "BF16"])
-def test_resident_scales_flag_controls_loading_and_estimates(
+def test_resident_scales_loading_and_estimates(
     converted, monkeypatch, tmp_path, source_checkpoint, scale_dtype
 ):
     source = converted.parent / "source"
@@ -263,35 +263,26 @@ def test_resident_scales_flag_controls_loading_and_estimates(
         return nullcontext()
 
     monkeypatch.setattr(loading, "wired_limit", wired_limit)
-    baseline = None
-    for flag in (None, "0", "1", "0"):
-        name = "OMLX_DEEPSEEK_V41_RESIDENT_ENGRAM_SCALES"
-        if flag is None:
-            monkeypatch.delenv(name, raising=False)
-        else:
-            monkeypatch.setenv(name, flag)
-        estimate = deepseek_v41_residency_estimate(target)
-        baseline = baseline or estimate
-        enabled = flag == "1" and scale_dtype == "F8_E8M0"
-        scale_bytes = 72 + 204 if enabled else 0
-        assert estimate.resident_bytes == baseline.resident_bytes
-        assert estimate.engram_bytes == baseline.engram_bytes
-        assert abs(
-            estimate.mmap_bytes - baseline.mmap_bytes - scale_bytes * 1.05
-        ) <= 1
-        wired.clear()
-        model, _ = load(target, engram_ssd_offload=True)
-        try:
-            assert bool(wired) == (flag == "1")
-            for layer in model.language_model.pipeline_layers:
-                if "engram" in layer:
-                    embed = layer.engram.embed
-                    assert set(embed._resident or {}) == (
-                        {embed._scale_key} if enabled else set()
-                    )
-                    assert embed._weights._mapping is not None
-        finally:
-            model.close()
+    estimate = deepseek_v41_residency_estimate(target)
+    enabled = scale_dtype == "F8_E8M0"
+    scale_bytes = 72 + 204 if enabled else 0
+    assert estimate.engram_bytes == sum(data.nbytes for data, _ in tensors.values())
+    assert abs(
+        estimate.mmap_bytes - estimate.resident_bytes
+        + (estimate.engram_bytes - scale_bytes) * 1.05 - 32 * 1024 * 1024
+    ) <= 1
+    model, _ = load(target, engram_ssd_offload=True)
+    try:
+        assert wired == [model]
+        for layer in model.language_model.pipeline_layers:
+            if "engram" in layer:
+                embed = layer.engram.embed
+                assert set(embed._resident or {}) == (
+                    {embed._scale_key} if enabled else set()
+                )
+                assert embed._weights._mapping is not None
+    finally:
+        model.close()
 
 
 def test_converted_modes_match_chunked_prefill_decode_and_cleanup(converted):

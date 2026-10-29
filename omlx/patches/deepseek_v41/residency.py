@@ -2,7 +2,6 @@
 """Original and converted V4.1 residency estimates from tensor headers."""
 
 import json
-import os
 import struct
 from dataclasses import dataclass
 from functools import lru_cache
@@ -56,15 +55,11 @@ def checkpoint_signature(model_path):
 
 def deepseek_v41_residency_estimate(model_path):
     path = Path(model_path).expanduser().resolve()
-    return _estimate(
-        str(path),
-        checkpoint_signature(path),
-        os.environ.get("OMLX_DEEPSEEK_V41_RESIDENT_ENGRAM_SCALES") == "1",
-    )
+    return _estimate(str(path), checkpoint_signature(path))
 
 
 @lru_cache(maxsize=128)
-def _estimate(model_path, signature, resident_engram_scales):
+def _estimate(model_path, signature):
     path = Path(model_path)
     config = json.loads((path / "config.json").read_text())
     spec = config.get("omlx_deepseek_v41")
@@ -111,9 +106,7 @@ def _estimate(model_path, signature, resident_engram_scales):
                 key = table["scale_key"]
                 size = tensor_bytes(filename, key)
                 engram += size
-                if resident_engram_scales and entry(filename, key)["dtype"].startswith(
-                    "F8_E8M0"
-                ):
+                if entry(filename, key)["dtype"].startswith("F8_E8M0"):
                     resident_scales += size
             if table.get("bias_key"):
                 engram += tensor_bytes(
@@ -129,8 +122,7 @@ def _estimate(model_path, signature, resident_engram_scales):
             if ".engram.embed." in key:
                 engram += size
                 if (
-                    resident_engram_scales
-                    and key.endswith(".scale")
+                    key.endswith(".scale")
                     and entry(filename, key)["dtype"].startswith("F8_E8M0")
                 ):
                     resident_scales += size
