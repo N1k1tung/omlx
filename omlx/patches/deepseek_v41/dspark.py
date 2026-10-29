@@ -6,30 +6,47 @@ never enter that ring. Server acceptance/rollback is a separate integration.
 """
 
 from dataclasses import replace
+from types import SimpleNamespace
 
 import mlx.core as mx
 import mlx.nn as nn
 
 from ..mlx_lm_mtp.deepseek_v4_dspark import DSparkContextCache
+from . import decode_fused, decode_moe
 from .head import project_logits
-from .language import Attention, Block, RMSNorm, hc_mixes, hc_post, hc_pre, rope
+from .language import (
+    Attention,
+    Block,
+    RMSNorm,
+    _rope_positions,
+    _rope_table,
+    hc_mixes,
+    hc_post,
+    hc_pre,
+    rope,
+)
 from .quantization import quantize_activation
 
 
 class DSparkAttention(Attention):
+    def context_keys(self, main_x, positions=None, *, cos=None, sin=None):
+        return quantize_activation(
+            rope(self.kv_norm(self.wkv(main_x)), positions, self._config, False, cos=cos, sin=sin)
+        )[:, None]
+
     def append_context(self, main_x, cache, *, start_offset=None):
-        c = self._config
         start = cache.offset if start_offset is None else start_offset
         positions = range(start, start + main_x.shape[1])
-        kv = quantize_activation(
-            rope(self.kv_norm(self.wkv(main_x)), positions, c, False)
-        )
-        cache.append(kv[:, None], start_offset=start_offset)
+        cache.append(self.context_keys(main_x, positions), start_offset=start_offset)
 
     def __call__(self, x, cache):
-        c = self._config
         batch, length, _ = x.shape
-        positions = range(cache.offset, cache.offset + length)
+        c = self._config
+        cos, sin = getattr(cache, "cos", None), getattr(cache, "sin", None)
+        positions = (
+            None if cos is not None and sin is not None
+            else range(cache.offset, cache.offset + length)
+        )
         q = rope(
             self.wq_b(self.q_norm(self.wq_a(x))).reshape(
                 batch, length, c.n_heads, c.head_dim
@@ -37,9 +54,11 @@ class DSparkAttention(Attention):
             positions,
             c,
             False,
+            cos=cos,
+            sin=sin,
         )
         draft_kv = quantize_activation(
-            rope(self.kv_norm(self.wkv(x)), positions, c, False)
+            rope(self.kv_norm(self.wkv(x)), positions, c, False, cos=cos, sin=sin)
         )
         kv = mx.concatenate([cache.keys[:, 0], draft_kv], axis=1)
         # V4.1 does not apply V4's per-head query RMS normalization.
@@ -57,7 +76,7 @@ class DSparkAttention(Attention):
             .transpose(0, 2, 1, 3)
             .astype(q.dtype)
         )
-        out = rope(out, positions, c, False, inverse=True)
+        out = rope(out, positions, c, False, inverse=True, cos=cos, sin=sin)
         # 1017 reference DSparkAttention: act_quant(o) before the wo_a einsum.
         grouped = quantize_activation(out.reshape(batch, length, c.o_groups, -1))
         weight = self.wo_a.weight.reshape(c.o_groups, c.o_lora_rank, -1)
@@ -120,7 +139,18 @@ class DSparkBlock(Block):
         fp, fo, fc = hc_mixes(
             h, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base, self._config
         )
-        h = hc_post(self.ffn(self.ffn_norm(hc_pre(h, ap)), None), h, fo, fc)
+        x = self.ffn_norm(hc_pre(h, ap))
+        flat = x.reshape(-1, self._config.dim)
+        if (
+            mx.default_device() == mx.gpu
+            and 1 <= flat.shape[0] <= decode_fused.MAX_BATCH
+            and decode_moe.supported(self.ffn, flat[:1], self._config)
+        ):
+            f = decode_moe.fused_decode_moe_nb(self.ffn, flat, self._config)[0]
+            f = f.reshape(x.shape)
+        else:
+            f = self.ffn(x, None)
+        h = hc_post(f, h, fo, fc)
         return h, fp
 
 
@@ -138,6 +168,27 @@ def make_stages(c):
 
 def make_cache(c):
     return [DSparkContextCache(c.window_size) for _ in range(c.n_mtp_layers)]
+
+
+def append_context_compiled(model, main_hidden, cache, start_offset):
+    """Project short committed prefixes with positions supplied as arrays."""
+    c = model._config
+    start = cache[0].offset if start_offset is None else start_offset
+    cos, sin = _rope_table(
+        (c.rope_head_dim, c.rope_theta, 0, c.rope_factor, c.beta_fast, c.beta_slow),
+        _rope_positions(range(start, start + main_hidden.shape[1])),
+    )
+    compiled = getattr(model, "_omlx_dspark_context_compiled", None)
+    if compiled is None:
+        def body(hidden, cos, sin):
+            first = model.mtp[0]
+            projected = first.main_norm(first.main_proj(hidden))
+            return tuple(stage.attn.context_keys(projected, cos=cos, sin=sin) for stage in model.mtp)
+
+        compiled = mx.compile(body)
+        object.__setattr__(model, "_omlx_dspark_context_compiled", compiled)
+    for item, keys in zip(cache, compiled(main_hidden, cos, sin)):
+        item.append(keys, start_offset=start)
 
 
 def forward_spec(model, input_ids, main_hidden, cache, *, temperature=0.0):
@@ -214,3 +265,78 @@ def proposal_forward(model, input_ids, cache, draft_length=None):
     h = hc_pre(h, pre)
     logits = project_logits(final.norm(h), model.head.weight)
     return logits, h
+
+
+def _proposal_body(model):
+    """Array-only DSpark proposal graph for ``mx.compile``.
+
+    Stage caches are passed as their key arrays plus the already-built RoPE
+    tables. That avoids baking the advancing cache offset into a scalar
+    constant: ``mx.compile`` retraces whenever such a constant changes, which
+    is every decode token and is what made the first compiled path slower.
+    """
+
+    c = model._config
+
+    def body(input_ids, cache_keys, cos, sin, width):
+        input_ids = input_ids.reshape(input_ids.shape[0], -1)[:, -1:]
+        ids = mx.concatenate(
+            [
+                input_ids,
+                mx.full(
+                    (input_ids.shape[0], width - 1),
+                    c.dspark_noise_token_id,
+                    dtype=input_ids.dtype,
+                ),
+            ],
+            axis=1,
+        )
+        h = mx.repeat(model.embed(ids)[..., None, :], c.hc_mult, -2)
+        pre = mx.broadcast_to(
+            (mx.arange(c.hc_mult) == 0).astype(mx.float32), h.shape[:-1]
+        )
+        for stage, keys in zip(model.mtp, cache_keys):
+            h, pre = stage(h, pre, SimpleNamespace(keys=keys, cos=cos, sin=sin))
+        final = model.mtp[-1]
+        h = hc_pre(h, pre)
+        return project_logits(final.norm(h), model.head.weight), h
+
+    return body
+
+
+def proposal_forward_compiled(model, input_ids, cache, draft_length=None):
+    """``proposal_forward`` in one compiled graph when the context is ready.
+
+    The draft head is speculative, so only its acceptance rate changes; the
+    target verifier still produces the emitted distribution. An empty or
+    unwritten context falls back to the ordinary function. RoPE tables are
+    built outside the graph and carried as array inputs, so advancing context
+    positions do not retrace the graph. Graphs are cached per draft width.
+    """
+    c = model._config
+    width = max(1, min(draft_length or c.dspark_block_size, c.dspark_block_size))
+    keys = tuple(item.keys for item in cache)
+    offsets = tuple(item.offset for item in cache)
+    if len(keys) != len(model.mtp) or any(k is None for k in keys):
+        return proposal_forward(model, input_ids, cache, draft_length=draft_length)
+    offset = offsets[0]
+    if any(o != offset for o in offsets):
+        return proposal_forward(model, input_ids, cache, draft_length=draft_length)
+    params = (
+        c.rope_head_dim,
+        c.rope_theta,
+        0,
+        c.rope_factor,
+        c.beta_fast,
+        c.beta_slow,
+    )
+    cos, sin = _rope_table(params, _rope_positions(range(offset, offset + width)))
+    compiled = getattr(model, "_omlx_dspark_proposal_compiled", None)
+    if not isinstance(compiled, dict):
+        compiled = {}
+        object.__setattr__(model, "_omlx_dspark_proposal_compiled", compiled)
+    body = compiled.get(width)
+    if body is None:
+        body = mx.compile(_proposal_body(model))
+        compiled[width] = body
+    return body(input_ids, keys, cos, sin, width)

@@ -79,17 +79,23 @@ class DSparkMixin:
         return self.make_dspark_cache()
 
     def dspark_append_context(self, main_hidden, cache, *, start_offset=None):
+        from .dspark import append_context_compiled
+
+        # Prefill keeps its existing graph; only the few newly committed rows
+        # recur at decode time. Array RoPE inputs avoid retracing each position.
+        if 1 <= main_hidden.shape[1] <= 8:
+            return append_context_compiled(self, main_hidden, cache, start_offset)
         first = self.mtp[0]
         projected = first.main_norm(first.main_proj(main_hidden))
         for stage, item in zip(self.mtp, cache):
             stage.attn.append_context(projected, item, start_offset=start_offset)
 
     def dspark_forward(self, main_hidden, anchor_ids, cache=None, *, draft_length=None):
-        from .dspark import proposal_forward
+        from .dspark import proposal_forward_compiled
 
         cache = self.make_mtp_cache() if cache is None else cache
         self.dspark_append_context(main_hidden, cache)
-        return proposal_forward(self, anchor_ids, cache, draft_length)
+        return proposal_forward_compiled(self, anchor_ids, cache, draft_length)
 
     def dspark_markov(self, token_ids):
         return self.mtp[-1].markov_head(token_ids)

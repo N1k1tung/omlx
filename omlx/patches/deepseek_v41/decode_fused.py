@@ -238,6 +238,29 @@ def compress_index(att, x, qr, cache, shared, start, c):
 def _rows(p, v):
     """p applied to each row of v ([1, R, K]) on its own, as when each token decodes alone
     (a multi-row MLX GEMV rounds its fp32 sums differently)."""
+    if (
+        isinstance(p, QuantizedProjection)
+        and p.mode == "affine" and p.bits == 8
+        and p.group_size in (32, 64, 128)
+        and 2 <= v.shape[1] <= MAX_BATCH
+        and v.dtype in (mx.bfloat16, mx.float16, mx.float32)
+        and p.scales.dtype == p.biases.dtype
+        and (p.scales.dtype == v.dtype or v.dtype == mx.float32)
+        and p.input_dims >= 1024 and p.input_dims % 256 == 0
+        and p.weight.shape[0] >= 8 and p.weight.shape[0] % 8 == 0
+        and mx.default_device() == mx.gpu
+    ):
+        from ..deepseek_v4.verify_qmv import exact_rows_qmv
+
+        # Reuse MLX M=1 arithmetic across rows. Compressor projections keep
+        # their FP32 inputs and disabled activation quantization; the fused
+        # attention GEMVs would instead quantize those inputs to FP8.
+        x = quantize_activation(v) if p.quantize_input else v
+        return exact_rows_qmv(
+            x.reshape(-1, x.shape[-1]), p.weight,
+            p.scales.astype(x.dtype), p.biases.astype(x.dtype),
+            group_size=p.group_size, mxfp8=False, rps=1,
+        ).reshape(*v.shape[:-1], p.weight.shape[0])
     return mx.concatenate([p(v[:, j : j + 1]) for j in range(v.shape[1])], 1)
 
 
