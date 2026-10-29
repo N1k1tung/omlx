@@ -1,6 +1,7 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/string.h>
+#include <nanobind/stl/tuple.h>
 #include <nanobind/stl/variant.h>
 
 #include "block_mask_attention.h"
@@ -107,6 +108,12 @@ NB_MODULE(_ext, m) {
       "q_offset"_a,
       "compress_ratio"_a,
       "local_window"_a,
+      "stream"_a = nb::none());
+  m.def(
+      "packed_kv_unpack",
+      &omlx::attention::packed_kv_unpack,
+      "local_kv"_a,
+      "pooled"_a,
       "stream"_a = nb::none());
   m.def(
       "fa256_attention",

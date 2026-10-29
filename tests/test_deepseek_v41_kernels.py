@@ -134,6 +134,51 @@ def test_index_scores_packed_candidates_and_causal(
     )
 
 
+@pytest.mark.parametrize("length,start,ratio,key_start,strided", [
+    (16, 0, 2, 0, False), (17, 8191, 2, 0, False),
+    (37, 4100, 1, 0, False), (19, 8191, 2, 7, True),
+])
+def test_multi_query_index_scores_match_original(length, start, ratio, key_start, strided):
+    mx.random.seed(241)
+    stride = 2 if strided else 1
+    q = quantize_activation(
+        mx.random.normal((1, length * stride, 32, 128)).astype(mx.bfloat16), bits=4
+    )[:, ::stride]
+    keys = pack_activation(
+        mx.random.normal((1, 4103 * stride, 128)).astype(mx.bfloat16), 4
+    )[:, ::stride]
+    weights = mx.random.normal((1, length * stride, 32)).astype(mx.bfloat16)[:, ::stride]
+    actual = packed_index_scores(q, keys, weights, start, ratio, key_start=key_start)
+    # At most eight queries always take the unchanged single-query MMA path.
+    expected = mx.concatenate([
+        packed_index_scores(q[:, i:i + 8], keys, weights[:, i:i + 8],
+                            start + i, ratio, key_start=key_start)
+        for i in range(0, length, 8)
+    ], axis=1)
+    assert mx.array_equal(actual, expected).item()
+
+
+@pytest.mark.parametrize("length,candidates,dtype", [
+    (1, False, mx.bfloat16), (6, False, mx.bfloat16),
+    (15, False, mx.bfloat16), (17, True, mx.bfloat16),
+    (17, False, mx.float16), (17, False, mx.float32),
+])
+def test_multi_query_index_dispatch_preserves_other_paths(monkeypatch, length, candidates, dtype):
+    calls, original_kernel = [], kernels._kernel
+
+    def tracked(kind):
+        calls.append(kind)
+        return original_kernel(kind)
+
+    monkeypatch.setattr(kernels, "_kernel", tracked)
+    q = mx.zeros((1, length, 32, 128), dtype)
+    keys = pack_activation(mx.ones((1, 4103, 128)), 4)
+    weights = mx.ones((1, length, 32))
+    indices = mx.broadcast_to(mx.arange(4103)[None, None], (1, length, 4103)) if candidates else None
+    mx.eval(packed_index_scores(q, keys, weights, 8192, 2, indices))
+    assert calls == ["index_mma"]
+
+
 def test_candidate_block_ids_preserve_latest_and_partial_blocks():
     scores = mx.array(
         [

@@ -300,6 +300,85 @@ _INDEX_MMA = r"""
     }
 """
 
+_INDEX_MULTI_MMA = r"""
+    const uint tid = thread_index_in_threadgroup;
+    const uint lane = tid % 32, sg = tid / 32;
+    const uint first_query = threadgroup_position_in_grid.y * QUERIES;
+    constexpr uint COLS = 16;
+    const uint key_group = sg % 2;
+    const uint block = threadgroup_position_in_grid.x * COLS;
+    const int H = 32, N = meta[1], M = meta[2], start = meta[3], length = meta[6];
+    const uint fm = ((lane >> 2) & 4) + ((lane >> 1) & 3);
+    const uint fn = (((lane >> 2) & 2) << 1) + ((lane & 1) << 1);
+    threadgroup float tile[D * COLS];
+    for (uint i = tid; i < D * COLS; i += 128) {
+        const uint d = i / COLS, col = i % COLS, pos = block + col;
+        float value = 0.0f;
+        if (pos < uint(N) && pos + meta[5] < (start + min(first_query + QUERIES, uint(length))) / RATIO) {
+            const size_t base = size_t(pos) * (D / 2 + D / 32);
+            const uchar code = (keys[base + d / 2] >> ((d % 2) * 4)) & 15;
+            value = ldexp(v41_fp4(code), int(keys[base + D / 2 + d / 32]) - 127);
+        }
+        tile[i] = value;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float total0[QUERIES] = {0.0f}, total1[QUERIES] = {0.0f};
+    for (int h = int(sg / 2) * 8; h < H; h += 16) {
+        simdgroup_matrix<float, 8, 8> acc[QUERIES], a, b;
+        #pragma clang loop unroll(full)
+        for (uint u = 0; u < QUERIES; ++u) {
+            acc[u].thread_elements()[0] = 0.0f;
+            acc[u].thread_elements()[1] = 0.0f;
+        }
+        #pragma clang loop unroll(full)
+        for (int d = 0; d < D; d += 8) {
+            b.thread_elements()[0] = tile[(d + fm) * COLS + key_group * 8 + fn];
+            b.thread_elements()[1] = tile[(d + fm) * COLS + key_group * 8 + fn + 1];
+            #pragma clang loop unroll(full)
+            for (uint u = 0; u < QUERIES; ++u) {
+                const uint query = first_query + u;
+                a.thread_elements()[0] = query < uint(length) ? float(q[(query * H + h + fm) * D + d + fn]) : 0.0f;
+                a.thread_elements()[1] = query < uint(length) ? float(q[(query * H + h + fm) * D + d + fn + 1]) : 0.0f;
+                simdgroup_multiply_accumulate(acc[u], a, b, acc[u]);
+            }
+        }
+        #pragma clang loop unroll(full)
+        for (uint u = 0; u < QUERIES; ++u) {
+            const uint query = first_query + u;
+            const float weight = query < uint(length) ? weights[query * H + h + fm] : 0.0f;
+            // Match the single-query kernel's per-head rounding and sum order.
+            float v0 = float(R(max(float(R(acc[u].thread_elements()[0])), 0.0f) * weight));
+            float v1 = float(R(max(float(R(acc[u].thread_elements()[1])), 0.0f) * weight));
+            for (uint i = 0; i < 3; ++i) {
+                const uint mask = i == 0 ? 2 : (i == 1 ? 4 : 16);
+                v0 += simd_shuffle_xor(v0, mask);
+                v1 += simd_shuffle_xor(v1, mask);
+            }
+            total0[u] += v0;
+            total1[u] += v1;
+        }
+    }
+    threadgroup float head_totals[32 * QUERIES];
+    #pragma clang loop unroll(full)
+    for (uint u = 0; u < QUERIES; ++u) {
+        if (fm == 0) {
+            head_totals[u * 32 + sg * 8 + fn] = total0[u];
+            head_totals[u * 32 + sg * 8 + fn + 1] = total1[u];
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid < COLS && block + tid < uint(M)) {
+        const uint pos = block + tid;
+        #pragma clang loop unroll(full)
+        for (uint u = 0; u < QUERIES; ++u) {
+            const uint query = first_query + u;
+            if (query >= uint(length)) continue;
+            const bool valid = pos < uint(N) && pos + meta[5] < (start + query + 1) / RATIO;
+            scores[query * M + pos] = valid ? float(R(head_totals[u * 32 + tid] + head_totals[u * 32 + tid + COLS])) : -INFINITY;
+        }
+    }
+"""
+
 _MERGE = r"""
     const uint lane = thread_index_in_threadgroup % 32;
     const uint head = threadgroup_position_in_grid.x * 4
@@ -339,7 +418,10 @@ def _kernel(kind):
         outputs, source = ["out"], _MERGE
     else:
         inputs = ["q", "keys", "weights", "candidates", "meta"]
-        outputs, source = ["scores"], _INDEX_MMA if kind == "index_mma" else _INDEX
+        outputs, source = ["scores"], (
+            _INDEX_MULTI_MMA if kind == "index_multi_mma"
+            else _INDEX_MMA if kind == "index_mma" else _INDEX
+        )
     return mx.fast.metal_kernel(
         name="deepseek_v41_packed_" + kind,
         input_names=inputs,
@@ -494,7 +576,12 @@ def packed_index_scores(
     mma = dim <= 128 and heads >= 8
     head_split = mma and heads >= 32
     cols = 16 if head_split else 32
-    return _kernel("index_mma" if mma else "index")(
+    # Share decoded key tiles only for the released long-prefill geometry.
+    queries = 8 if (
+        candidates is None and q.dtype == mx.bfloat16 and heads == 32
+        and dim == 128 and length >= 16 and width >= 4096
+    ) else 1
+    return _kernel("index_multi_mma" if queries > 1 else "index_mma" if mma else "index")(
         inputs=[
             q,
             keys if keys.size else mx.zeros((1,), mx.uint8),
@@ -504,7 +591,7 @@ def packed_index_scores(
                 if candidates is None
                 else candidates.astype(mx.int32)
             ),
-            mx.array([heads, keys.shape[1], width, start, ratio, key_start], mx.int32),
+            mx.array([heads, keys.shape[1], width, start, ratio, key_start, length], mx.int32),
         ],
         template=[
             ("D", dim),
@@ -513,10 +600,11 @@ def packed_index_scores(
             ("HEADS", heads),
             ("RATIO", ratio),
             ("R", q.dtype),
+            ("QUERIES", queries),
         ],
         grid=(
             ((width + cols - 1) // cols if mma else (width + 3) // 4) * 128,
-            length,
+            (length + queries - 1) // queries,
             1,
         ),
         threadgroup=(128, 1, 1),

@@ -28,6 +28,107 @@ bool last_dim_contiguous(const array& arr) {
   return arr.strides(-1) == 1;
 }
 
+class PackedKVUnpackPrimitive : public Primitive {
+ public:
+  explicit PackedKVUnpackPrimitive(Stream stream) : Primitive(stream) {}
+
+  static bool unsupported(
+      const array& local_kv, const array& pooled, Stream s) {
+    if (s.device == Device::cpu) {
+      return true;
+    }
+    if (local_kv.dtype() != uint8 || pooled.dtype() != uint8) {
+      return true;
+    }
+    if (local_kv.ndim() != 4 || pooled.ndim() != 3) {
+      return true;
+    }
+    if (!last_dim_contiguous(local_kv) || !last_dim_contiguous(pooled)) {
+      return true;
+    }
+    if (local_kv.shape(0) != pooled.shape(0) || local_kv.shape(1) != 1 ||
+        local_kv.shape(3) != 528 || pooled.shape(2) != 288) {
+      return true;
+    }
+    return false;
+  }
+
+  void eval_cpu(
+      const std::vector<array>& /* inputs */,
+      std::vector<array>& /* outputs */) override {
+    throw std::runtime_error(
+        "PackedKVUnpackPrimitive has no CPU path.");
+  }
+
+  void eval_gpu(
+      const std::vector<array>& inputs,
+      std::vector<array>& outputs) override {
+    auto& s = stream();
+    auto& d = metal::device(s.device);
+    const auto& local_kv = inputs[0];
+    const auto& pooled = inputs[1];
+    auto& local_dense = outputs[0];
+    auto& pooled_dense = outputs[1];
+    local_dense.set_data(allocator::malloc(local_dense.nbytes()));
+    pooled_dense.set_data(allocator::malloc(pooled_dense.nbytes()));
+
+    constexpr int dim = 512;
+    const int B = local_kv.shape(0);
+    const int localL = local_kv.shape(2);
+    const int pooledL = pooled.shape(1);
+
+    DeepseekV4SparseAttentionParams params{
+        /* int B = */ B,
+        /* int H = */ 0,
+        /* int qL = */ 0,
+        /* int localL = */ localL,
+        /* int pooledL = */ pooledL,
+        /* int topk = */ 0,
+        /* int local_window = */ 0,
+        /* int compress_ratio = */ 1,
+        /* int q_offset = */ 0,
+        /* float scale = */ 0.0f,
+        /* int64_t Q_strides[3] = */ {0, 0, 0},
+        /* int64_t Local_strides[3] = */ {
+            local_kv.strides(0), bcast_stride(local_kv, 1), local_kv.strides(2)},
+        /* int64_t Pooled_strides[2] = */ {
+            pooled.strides(0), pooled.strides(1)},
+        /* int64_t Topk_strides[3] = */ {0, 0, 0},
+        /* int64_t O_strides[3] = */ {0, 0, 0}};
+
+    auto lib = d.get_library("omlx_attention_kernels", binary_dir());
+    auto& compute_encoder = metal::get_command_encoder(s);
+    auto unpack_kernel = d.get_kernel("deepseek_v41_prefill_unpack_kv", lib);
+    compute_encoder.set_compute_pipeline_state(unpack_kernel);
+    compute_encoder.set_input_array(local_kv, 0);
+    compute_encoder.set_input_array(pooled, 1);
+    compute_encoder.set_output_array(local_dense, 2);
+    compute_encoder.set_output_array(pooled_dense, 3);
+    compute_encoder.set_bytes(params, 4);
+    compute_encoder.dispatch_threads(
+        MTL::Size(size_t(B) * (localL + pooledL) * dim, 1, 1),
+        MTL::Size(256, 1, 1));
+  }
+
+  DEFINE_NAME(OMLXPackedKVUnpack)
+  std::vector<Shape> output_shapes(
+      const std::vector<array>& inputs) override {
+    return {
+        Shape{inputs[0].shape(0), 1,
+              static_cast<int>(std::max<int64_t>(inputs[0].shape(2), int64_t(1))),
+              512},
+        Shape{inputs[1].shape(0),
+              static_cast<int>(std::max<int64_t>(inputs[1].shape(1), int64_t(1))),
+              512}};
+  }
+  bool is_equivalent(const Primitive& /* other */) const override {
+    return true;
+  }
+  auto state() const {
+    return std::make_tuple(nullptr);
+  }
+};
+
 class PackedSparseAttentionPrimitive : public Primitive {
  public:
   PackedSparseAttentionPrimitive(
@@ -55,8 +156,11 @@ class PackedSparseAttentionPrimitive : public Primitive {
     if (s.device == Device::cpu) {
       return true;
     }
-    if (local_kv.dtype() != uint8 || pooled.dtype() != uint8 ||
-        sinks.dtype() != float32) {
+    const bool packed_kv =
+        local_kv.dtype() == uint8 && pooled.dtype() == uint8;
+    const bool dense_kv =
+        local_kv.dtype() == bfloat16 && pooled.dtype() == bfloat16;
+    if ((!packed_kv && !dense_kv) || sinks.dtype() != float32) {
       return true;
     }
     if (q.dtype() != bfloat16) {
@@ -74,7 +178,8 @@ class PackedSparseAttentionPrimitive : public Primitive {
     if (q.shape(0) != local_kv.shape(0) || q.shape(0) != pooled.shape(0) ||
         q.shape(0) != topk_indices.shape(0) || q.shape(1) != 64 ||
         q.shape(3) != 512 || local_kv.shape(1) != 1 ||
-        local_kv.shape(3) != 528 || pooled.shape(2) != 288 ||
+        local_kv.shape(3) != (packed_kv ? 528 : 512) ||
+        pooled.shape(2) != (packed_kv ? 288 : 512) ||
         topk_indices.shape(1) != 1 || topk_indices.shape(2) != q.shape(2) ||
         sinks.shape(0) != q.shape(1)) {
       return true;
@@ -120,6 +225,7 @@ class PackedSparseAttentionPrimitive : public Primitive {
     const int qL = q.shape(2);
     const int localL = local_kv.shape(2);
     const int pooledL = pooled.shape(1);
+    const bool dense_inputs = local_kv.dtype() == bfloat16;
     const int topkN = topk.shape(3);
 
     int64_t str_oD = 1;
@@ -160,16 +266,17 @@ class PackedSparseAttentionPrimitive : public Primitive {
       base_name += "_directq";
     }
 
-    // Long prefill chunks decode each KV row once into temporary BF16 rows.
-    // The scratch budget grows with the chunk (80 KiB per query, 80-512 MiB);
-    // longer contexts keep reading packed rows.
+    // Packed inputs amortize decoding KV over the query chunk when the dense
+    // scratch fits the budget. Dense inputs are already-unpacked cache rows
+    // reused across adjacent layers; no unpack pass is needed for them.
     const size_t unpack_bytes =
         size_t(B) * (localL + std::max(pooledL, 1)) * dim * sizeof(uint16_t);
     const size_t unpack_budget = std::min(
         size_t(512 * 1024 * 1024),
         std::max(size_t(80 * 1024 * 1024), size_t(qL) * 80 * 1024));
-    const bool unpack_kv = qL >= 256 && unpack_bytes <= unpack_budget;
-    if (unpack_kv) {
+    const bool unpack_kv =
+        !dense_inputs && qL >= 256 && unpack_bytes <= unpack_budget;
+    if (unpack_kv || dense_inputs) {
       base_name += "_unpacked";
     }
 
@@ -223,6 +330,8 @@ class PackedSparseAttentionPrimitive : public Primitive {
       compute_encoder.dispatch_threads(
           MTL::Size(size_t(B) * (localL + pooledL) * dim, 1, 1),
           MTL::Size(256, 1, 1));
+    }
+    if (unpack_kv || dense_inputs) {
       // Attention receives byte pointers and strides, with the original shape
       // and masking metadata; only the row representation has changed.
       params.Local_strides[0] = int64_t(localL) * dim * sizeof(uint16_t);
@@ -287,10 +396,13 @@ array packed_sparse_attention(
         << sinks.shape() << ".";
     throw std::invalid_argument(msg.str());
   }
+  const bool dense_kv =
+      local_kv.dtype() == bfloat16 && pooled.dtype() == bfloat16;
   if (q.shape(0) != local_kv.shape(0) || q.shape(0) != pooled.shape(0) ||
       q.shape(0) != topk_indices.shape(0) || q.shape(1) != 64 ||
       q.shape(3) != 512 || local_kv.shape(1) != 1 ||
-      local_kv.shape(3) != 528 || pooled.shape(2) != 288 ||
+      local_kv.shape(3) != (dense_kv ? 512 : 528) ||
+      pooled.shape(2) != (dense_kv ? 512 : 288) ||
       topk_indices.shape(1) != 1 || topk_indices.shape(2) != q.shape(2) ||
       sinks.shape(0) != q.shape(1)) {
     std::ostringstream msg;
@@ -346,4 +458,41 @@ array packed_sparse_attention(
       std::move(inputs));
 }
 
+std::tuple<array, array> packed_kv_unpack(
+    const array& local_kv,
+    const array& pooled,
+    StreamOrDevice s) {
+  if (local_kv.ndim() != 4 || pooled.ndim() != 3) {
+    throw std::invalid_argument(
+        "[attention.packed_kv_unpack] local_kv must be rank 4 and pooled rank 3.");
+  }
+  if (local_kv.dtype() != uint8 || pooled.dtype() != uint8) {
+    throw std::invalid_argument(
+        "[attention.packed_kv_unpack] inputs must be packed uint8 cache rows.");
+  }
+  if (local_kv.shape(0) != pooled.shape(0) || local_kv.shape(1) != 1 ||
+      local_kv.shape(3) != 528 || pooled.shape(2) != 288) {
+    throw std::invalid_argument(
+        "[attention.packed_kv_unpack] incompatible packed cache row shapes.");
+  }
+  auto stream = to_stream(s);
+  if (PackedKVUnpackPrimitive::unsupported(local_kv, pooled, stream)) {
+    throw std::invalid_argument(
+        "[attention.packed_kv_unpack] unsupported packed cache layout.");
+  }
+
+  constexpr int dim = 512;
+  const int B = local_kv.shape(0);
+  const int localL = local_kv.shape(2);
+  const int pooledL = pooled.shape(1);
+  std::vector<Shape> shapes = {
+      Shape{B, 1, std::max(localL, 1), dim},
+      Shape{B, std::max(pooledL, 1), dim}};
+  std::vector<Dtype> dtypes = {bfloat16, bfloat16};
+  std::vector<array> inputs = {local_kv, pooled};
+  auto outputs = array::make_arrays(
+      shapes, dtypes, std::make_shared<PackedKVUnpackPrimitive>(stream),
+      inputs);
+  return std::make_tuple(outputs[0], outputs[1]);
+}
 } // namespace omlx::attention
