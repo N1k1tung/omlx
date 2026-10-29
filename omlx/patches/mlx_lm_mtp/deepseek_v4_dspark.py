@@ -57,20 +57,11 @@ class DSparkContextCache:
 
     def __init__(self, max_size: int):
         self.max_size = int(max_size)
+        if self.max_size <= 0:
+            raise ValueError("DSpark context size must be positive")
         self.offset = 0
         self.keys: Optional[mx.array] = None
-
-    def _chronological(self, value: mx.array) -> mx.array:
-        """Temporarily expose a full physical ring from oldest to newest."""
-        if value.shape[2] < self.max_size or self.offset <= self.max_size:
-            return value
-        cutoff = self.offset % self.max_size
-        if cutoff == 0:
-            return value
-        return mx.concatenate(
-            [value[:, :, cutoff:], value[:, :, :cutoff]],
-            axis=2,
-        )
+        self._buffer = self._idle = self._last = None
 
     def _physical(self, value: mx.array, offset: int) -> mx.array:
         """Place chronological entries into absolute-position ring slots."""
@@ -101,14 +92,37 @@ class DSparkContextCache:
                     "DSpark context is not contiguous: "
                     f"cache={self.offset}, append={start}"
                 )
-        if self.keys is None:
-            next_keys = keys
-        else:
-            next_keys = mx.concatenate([self._chronological(self.keys), keys], axis=2)
+        if not length and self.keys is not None:
+            return
         next_offset = self.offset + length
-        if next_keys.shape[2] > self.max_size:
-            next_keys = next_keys[:, :, -self.max_size :]
-        self.keys = self._physical(next_keys, next_offset)
+        if length >= self.max_size:
+            buffer = self._physical(keys[:, :, -self.max_size :], next_offset)
+            self._idle = self._last = None
+        elif self.keys is not None and self.keys.shape[2] == self.max_size:
+            # Alternate buffers as in V4.1 cache growth. Public keys are views:
+            # submitted graphs keep their old storage alive; MLX copies if a
+            # reader still owns the idle buffer instead of overwriting it.
+            updates = [(self.offset, keys)]
+            if self._idle is None:
+                buffer = mx.array(self.keys)
+            else:
+                buffer = mx.array(self._idle)
+                updates.insert(0, self._last)
+            self._idle = None
+            for start, values in updates:
+                slot = start % self.max_size
+                first = min(values.shape[2], self.max_size - slot)
+                buffer[:, :, slot : slot + first] = values[:, :, :first]
+                if first < values.shape[2]:
+                    buffer[:, :, : values.shape[2] - first] = values[:, :, first:]
+            self._idle = self._buffer
+            self._last = (self.offset, keys)
+        else:
+            buffer = keys if self.keys is None else mx.concatenate([self.keys, keys], axis=2)
+            buffer = self._physical(buffer[:, :, -self.max_size :], next_offset)
+            self._idle = self._last = None
+        self._buffer = buffer
+        self.keys = buffer[:, :, :]
         self.offset = next_offset
 
 

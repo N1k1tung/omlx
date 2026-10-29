@@ -953,7 +953,9 @@ def supported(moe, x, config):
         and getattr(config, "score_func", "sqrtsoftplus") == "sqrtsoftplus"
         and all(f is not None for f in formats)
         and formats[3] != MXFP4 and formats[4] != MXFP4 and formats[5] != MXFP4
-        and config.n_activated_experts <= 31
+        # The kernels normalize routed weights; Gate skips this for top-1.
+        and config.norm_topk_prob
+        and 1 < config.n_activated_experts <= 31
         and config.dim % 256 == 0 and config.moe_inter_dim % 256 == 0
     )
 

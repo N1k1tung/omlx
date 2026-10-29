@@ -213,6 +213,39 @@ def test_dspark_context_cache_keeps_reference_physical_ring_order(dsv4):
     assert cache.keys.reshape(-1).tolist() == [8, 9, 10, 11]
 
 
+@pytest.mark.parametrize("start", [0, 2, 9, 103])
+def test_dspark_context_ring_wraps_and_preserves_live_readers(dsv4, start):
+    from copy import copy
+
+    cache = dsv4.DSparkContextCache(8)
+    history, readers = [], []
+    offset = start
+    for count in (0, 3, 2, 4, 1, 2, 3, 1, 19, 2, 7, 1):
+        positions = list(range(offset, offset + count))
+        cache.append(mx.array(positions, mx.float32).reshape(1, 1, count, 1), start_offset=offset)
+        offset += count
+        history = (history + positions)[-8:]
+        if cache.keys is None:
+            continue
+        expected = history[:]
+        if len(expected) == 8 and offset % 8:
+            expected = expected[-(offset % 8):] + expected[:-(offset % 8)]
+        readers.append((cache.keys, expected))
+        mx.async_eval(cache.keys)
+        assert cache.offset == offset
+    # Keep prior graph inputs alive across several reuse cycles.
+    for keys, expected in readers:
+        assert keys.reshape(-1).tolist() == expected
+    other = copy(cache)
+    old = cache.keys.reshape(-1).tolist()
+    for _ in range(4):
+        other.append(mx.full((1, 1, 1, 1), -1))
+        mx.eval(other.keys)
+    assert cache.keys.reshape(-1).tolist() == old
+    with pytest.raises(ValueError, match="not contiguous"):
+        cache.append(mx.zeros((1, 1, 1, 1)), start_offset=offset + 1)
+
+
 def test_dspark_sanitize_keeps_direct_stage_layout(dsv4):
     fake = SimpleNamespace(
         args=SimpleNamespace(
