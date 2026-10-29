@@ -2,6 +2,7 @@
 """Original and converted V4.1 residency estimates from tensor headers."""
 
 import json
+import os
 import struct
 from dataclasses import dataclass
 from functools import lru_cache
@@ -55,11 +56,15 @@ def checkpoint_signature(model_path):
 
 def deepseek_v41_residency_estimate(model_path):
     path = Path(model_path).expanduser().resolve()
-    return _estimate(str(path), checkpoint_signature(path))
+    return _estimate(
+        str(path),
+        checkpoint_signature(path),
+        os.environ.get("OMLX_DEEPSEEK_V41_RESIDENT_ENGRAM_SCALES") == "1",
+    )
 
 
 @lru_cache(maxsize=128)
-def _estimate(model_path, signature):
+def _estimate(model_path, signature, resident_engram_scales):
     path = Path(model_path)
     config = json.loads((path / "config.json").read_text())
     spec = config.get("omlx_deepseek_v41")
@@ -83,7 +88,7 @@ def _estimate(model_path, signature):
             raise ValueError("Invalid Engram tensor offsets")
         return end - start
 
-    base, engram = 0, 0
+    base, engram, resident_scales = 0, 0, 0
     if spec is not None:
         tables = spec.get("engram_tables", {})
         if not tables:
@@ -102,9 +107,14 @@ def _estimate(model_path, signature):
         for table in tables.values():
             engram += tensor_bytes(table["weight_file"], table["weight_key"])
             if table.get("scale_key"):
-                engram += tensor_bytes(
-                    table.get("scale_file") or table["weight_file"], table["scale_key"]
-                )
+                filename = table.get("scale_file") or table["weight_file"]
+                key = table["scale_key"]
+                size = tensor_bytes(filename, key)
+                engram += size
+                if resident_engram_scales and entry(filename, key)["dtype"].startswith(
+                    "F8_E8M0"
+                ):
+                    resident_scales += size
             if table.get("bias_key"):
                 engram += tensor_bytes(
                     table.get("scale_file") or table["weight_file"], table["bias_key"]
@@ -118,6 +128,12 @@ def _estimate(model_path, signature):
             size = tensor_bytes(filename, key)
             if ".engram.embed." in key:
                 engram += size
+                if (
+                    resident_engram_scales
+                    and key.endswith(".scale")
+                    and entry(filename, key)["dtype"].startswith("F8_E8M0")
+                ):
+                    resident_scales += size
                 continue
             weight_key = (
                 key.removesuffix(".scale") + ".weight"
@@ -143,6 +159,6 @@ def _estimate(model_path, signature):
     return EngramResidencyEstimate(
         engram > 0,
         int((base + engram) * 1.05),
-        int(base * 1.05) + 32 * 1024 * 1024,
+        int((base + resident_scales) * 1.05) + 32 * 1024 * 1024,
         engram,
     )

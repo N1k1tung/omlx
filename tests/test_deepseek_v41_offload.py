@@ -3,6 +3,7 @@
 
 import json
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from threading import Event, current_thread
 from types import SimpleNamespace
 
@@ -166,6 +167,46 @@ def test_prefetch_forward_error_releases_pending_rows(tmp_path):
         disk.close()
 
 
+@pytest.mark.parametrize("separate", [False, True])
+def test_resident_scales_preserve_prefetch_and_packed_rows(
+    tmp_path, monkeypatch, separate
+):
+    # Exercise the storage path on the CPU without allocating Metal buffers.
+    monkeypatch.setattr(storage, "_resident_buffer", np.empty)
+    disk = table(tmp_path)
+    if separate:
+        disk._scales = storage.TensorFile(tmp_path / "rows.safetensors")
+    ids = np.array([[5, 1, 5, 0]])
+    expected = disk._read_rows(ids)
+    prefetch = EngramPrefetch()
+    reads = []
+    original = storage.TensorFile.read
+
+    def read(self, key, *args, **kwargs):
+        reads.append(key)
+        return original(self, key, *args, **kwargs)
+
+    try:
+        disk.make_resident(scales_only=True)
+        assert set(disk._resident) == {"s"}
+        assert disk._weights._mapping is not None
+        monkeypatch.setattr(storage.TensorFile, "read", read)
+        with prefetch.forward():
+            prefetch.submit(disk, ids)
+            assert disk._prefetched is not None
+            actual = disk._prefetched[1].result(timeout=5)
+        for (got, dtype), (want, expected_dtype) in zip(actual, expected):
+            assert dtype == expected_dtype
+            np.testing.assert_array_equal(got, want)
+        assert reads == ["w"]
+        disk.make_resident()
+        assert reads == ["w", "w"]  # Reuse the scales when loading weights.
+        assert disk._weights._mapping is None and disk._scales._mapping is None
+    finally:
+        prefetch.close()
+        disk.close()
+
+
 @pytest.fixture
 def converted(tmp_path):
     source, _ = write_checkpoint(
@@ -182,6 +223,75 @@ def converted(tmp_path):
     target = tmp_path / "converted"
     convert(source, target)
     return target
+
+
+@pytest.mark.parametrize("source_checkpoint", [False, True])
+@pytest.mark.parametrize("scale_dtype", ["F8_E8M0", "BF16"])
+def test_resident_scales_flag_controls_loading_and_estimates(
+    converted, monkeypatch, tmp_path, source_checkpoint, scale_dtype
+):
+    source = converted.parent / "source"
+    index_path = source / "model.safetensors.index.json"
+    index = json.loads(index_path.read_text())
+    tensors = {}
+    for layer, rows in ((1, 72), (3, 204)):
+        prefix = f"layers.{layer}.engram.embed."
+        tensors[prefix + "weight"] = (
+            np.arange(rows * 32, dtype=np.uint8).reshape(rows, 32) % 80,
+            "F8_E4M3",
+        )
+        scale = (
+            np.full((rows, 1), 120, np.uint8)
+            if scale_dtype == "F8_E8M0"
+            else np.full((rows, 1), 0x3F80, np.uint16)
+        )
+        tensors[prefix + "scale"] = (scale, scale_dtype)
+        for suffix in ("weight", "scale"):
+            index["weight_map"][prefix + suffix] = "engram.safetensors"
+    raw_safetensors(source / "engram.safetensors", tensors)
+    index_path.write_text(json.dumps(index))
+    target = source
+    if not source_checkpoint:
+        target = tmp_path / "scaled-converted"
+        convert(source, target)
+
+    monkeypatch.setattr(storage, "_resident_buffer", np.empty)
+    wired = []
+
+    def wired_limit(model):
+        wired.append(model)
+        return nullcontext()
+
+    monkeypatch.setattr(loading, "wired_limit", wired_limit)
+    baseline = None
+    for flag in (None, "0", "1", "0"):
+        name = "OMLX_DEEPSEEK_V41_RESIDENT_ENGRAM_SCALES"
+        if flag is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, flag)
+        estimate = deepseek_v41_residency_estimate(target)
+        baseline = baseline or estimate
+        enabled = flag == "1" and scale_dtype == "F8_E8M0"
+        scale_bytes = 72 + 204 if enabled else 0
+        assert estimate.resident_bytes == baseline.resident_bytes
+        assert estimate.engram_bytes == baseline.engram_bytes
+        assert abs(
+            estimate.mmap_bytes - baseline.mmap_bytes - scale_bytes * 1.05
+        ) <= 1
+        wired.clear()
+        model, _ = load(target, engram_ssd_offload=True)
+        try:
+            assert bool(wired) == (flag == "1")
+            for layer in model.language_model.pipeline_layers:
+                if "engram" in layer:
+                    embed = layer.engram.embed
+                    assert set(embed._resident or {}) == (
+                        {embed._scale_key} if enabled else set()
+                    )
+                    assert embed._weights._mapping is not None
+        finally:
+            model.close()
 
 
 def test_converted_modes_match_chunked_prefill_decode_and_cleanup(converted):

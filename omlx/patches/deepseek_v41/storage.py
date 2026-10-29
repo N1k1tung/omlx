@@ -357,26 +357,29 @@ class DiskEngramEmbedding(nn.Module):
         self._resident = None
         self._prefetched = None
 
-    def make_resident(self):
-        """Keep packed tensors in Metal-managed RAM with shared CPU views."""
+    def make_resident(self, *, scales_only=False):
+        """Keep packed tensors, or just E8M0 scales, in Metal-managed RAM."""
         with self._lock:
-            resident = {
-                self._weight_key: self._weights.read(
-                    self._weight_key, metal_backed=True
-                ),
-            }
-            if self._scale_key is not None:
-                resident[self._scale_key] = self._scales.read(
-                    self._scale_key, metal_backed=True
-                )
-            if self._bias_key is not None:
-                resident[self._bias_key] = self._scales.read(
-                    self._bias_key, metal_backed=True
-                )
+            if self._closed:
+                raise RuntimeError("Engram embedding is closed")
+            if scales_only and (
+                self._scale_key is None
+                or not self._scales.header[self._scale_key]["dtype"].startswith("F8_E8M0")
+            ):
+                return
+            resident = dict(self._resident or {})
+            for reader, key in (
+                (self._weights, None if scales_only else self._weight_key),
+                (self._scales, self._scale_key),
+                (self._scales, None if scales_only else self._bias_key),
+            ):
+                if key is not None and key not in resident:
+                    resident[key] = reader.read(key, metal_backed=True)
             self._resident = resident
-            self._weights.close()
-            if self._scales is not self._weights:
-                self._scales.close()
+            if not scales_only:
+                self._weights.close()
+                if self._scales is not self._weights:
+                    self._scales.close()
 
     def selected_bytes(self, rows):
         total = 0
@@ -403,7 +406,7 @@ class DiskEngramEmbedding(nn.Module):
             ):
                 if key is None:
                     continue
-                if self._resident is None:
+                if self._resident is None or key not in self._resident:
                     result.append(reader.read(key, host.reshape(-1)))
                 else:
                     raw, dtype = self._resident[key]
@@ -468,7 +471,9 @@ class EngramPrefetch:
         self.drain()
         if self._closed:
             raise RuntimeError("Engram prefetch is closed")
-        if not isinstance(embed, DiskEngramEmbedding) or embed._resident is not None:
+        if not isinstance(embed, DiskEngramEmbedding) or (
+            embed._resident is not None and embed._weight_key in embed._resident
+        ):
             return
         host = np.asarray(ids, dtype=np.int64).copy()
         if embed.selected_bytes(host.size) + host.nbytes > PREFETCH_BYTES:

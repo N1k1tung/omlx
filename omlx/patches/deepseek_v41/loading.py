@@ -4,6 +4,7 @@
 import fcntl
 import json
 import logging
+import os
 from contextlib import ExitStack, closing
 from dataclasses import replace
 from pathlib import Path
@@ -103,6 +104,9 @@ def load(
     only its slice of the split projections. ``mtp_head`` keeps the DSpark
     stages on the cluster rank that drafts; a tensor-parallel rank holds them
     whole, since drafting runs there alone.
+
+    ``OMLX_DEEPSEEK_V41_RESIDENT_ENGRAM_SCALES=1`` keeps original E8M0
+    Engram scales in RAM when the weights are offloaded to SSD.
     """
     path = Path(path)
     if (path / "conversion.inprogress.json").exists():
@@ -200,9 +204,14 @@ def load(
             "SSD offload" if engram_ssd_offload else "host RAM",
         )
     memory_scope = ExitStack()
+    resident_engram_scales = (
+        os.environ.get("OMLX_DEEPSEEK_V41_RESIDENT_ENGRAM_SCALES") == "1"
+    )
     offload = None
     try:
-        if not engram_ssd_offload and config.engram_layer_ids:
+        if config.engram_layer_ids and (
+            not engram_ssd_offload or resident_engram_scales
+        ):
             # Include packed Engram storage in the normal MLX residency budget
             # during loading, before BatchGenerator takes ownership.
             memory_scope.enter_context(wired_limit(model))
@@ -430,12 +439,15 @@ def load(
         if model.config.engram_layer_ids:
             model.language_model.set_tokenizer(tokenizer)
         # Load the backbone before reserving RAM for large Engram tables.
-        if not engram_ssd_offload:
+        if not engram_ssd_offload or resident_engram_scales:
             for layer in model.language_model.pipeline_layers:
                 if "engram" in layer and isinstance(
                     layer.engram.embed, DiskEngramEmbedding
                 ):
-                    layer.engram.embed.make_resident()
+                    if engram_ssd_offload:
+                        layer.engram.embed.make_resident(scales_only=True)
+                    else:
+                        layer.engram.embed.make_resident()
         mx.eval(model.parameters())
         if config.a8_prefill:
             tagged = tag_dense_a8(model.language_model, config.a8_prefill_min_tokens)
