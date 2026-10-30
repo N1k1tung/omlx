@@ -321,6 +321,23 @@ def decode_array(raw, dtype):
     return mx.array(raw)
 
 
+def dedupe_tuple_ids(ids):
+    """Unique Engram 24-id tuples for wide prefill rows, and their inverse.
+
+    Decode/verify rows stay in input order; wide prefill rows can repeat the
+    same (ngram, head) tuple, so embedding and wkv work would be duplicated.
+    Returns the original ids with no inverse when every tuple is unique.
+    """
+    host = np.asarray(ids, dtype=np.int64)
+    if host.ndim != 3 or host.shape[0] * host.shape[1] <= 8:
+        return host, None
+    flat = host.reshape(-1, host.shape[-1])
+    unique, inverse = np.unique(flat, axis=0, return_inverse=True)
+    if unique.shape[0] == flat.shape[0]:
+        return host, None
+    return unique, inverse.reshape(host.shape[:-1])
+
+
 class DiskEngramEmbedding(nn.Module):
     def __init__(
         self,
@@ -473,6 +490,7 @@ class EngramPrefetch:
         host = np.asarray(ids, dtype=np.int64).copy()
         if not isinstance(embed, DiskEngramEmbedding) or embed._resident is not None:
             return
+        host, _ = dedupe_tuple_ids(host)
         # A carry read activated by a previous chunk is already exactly the
         # rows this layer consumes; leave it in place instead of re-reading.
         pending = embed._prefetched
@@ -498,6 +516,7 @@ class EngramPrefetch:
         host = np.asarray(ids, dtype=np.int64).copy()
         if not isinstance(embed, DiskEngramEmbedding) or embed._resident is not None:
             return False
+        host, _ = dedupe_tuple_ids(host)
         if embed.selected_bytes(host.size) + host.nbytes > PREFETCH_BYTES:
             return False
         future = self._executor.submit(embed._read_rows, host)
