@@ -119,7 +119,8 @@ def test_wide_affine_prefetch_keeps_rows_and_enforces_bound(
     )
     disk = DiskEngramEmbedding(path, "w", "s", bias_key="b", bits=4)
     prefetch = EngramPrefetch()
-    ids = (np.arange(tokens * 24, dtype=np.int64) % 16).reshape(1, tokens, 24)
+    ids = np.random.default_rng(tokens).integers(0, 16, (1, tokens, 24), dtype=np.int64)
+    unique_ids, _ = storage.dedupe_tuple_ids(ids)
     read = disk._read_rows
     threads = []
 
@@ -129,17 +130,17 @@ def test_wide_affine_prefetch_keeps_rows_and_enforces_bound(
 
     monkeypatch.setattr(disk, "_read_rows", observe)
     try:
-        expected = read(ids)
+        expected = read(unique_ids)
         with prefetch.forward():
             prefetch.submit(disk, ids)
             assert (prefetch._pending is not None) is admitted
             if admitted:
                 actual = prefetch._pending[1].result(timeout=10)
-                np.testing.assert_array_equal(disk._prefetched[0], ids)
+                np.testing.assert_array_equal(disk._prefetched[0], unique_ids)
                 assert threads == ["v41-engram_0"]
             else:
                 assert threads == []
-                actual = disk._read_rows(ids)
+                actual = disk._read_rows(unique_ids)
             for (got, got_dtype), (want, want_dtype) in zip(actual, expected):
                 assert got_dtype == want_dtype
                 np.testing.assert_array_equal(got, want)
