@@ -455,7 +455,7 @@ PREFETCH_BYTES = 64 * 1024 * 1024
 
 
 class EngramPrefetch:
-    """One pending CPU read per model, drained at each forward boundary."""
+    """One pending CPU read per forward, plus an optional next-chunk carry."""
 
     def __init__(self):
         self._executor = ThreadPoolExecutor(
@@ -464,24 +464,62 @@ class EngramPrefetch:
         self._pending = None
         self._closed = False
 
+    def has_pending(self) -> bool:
+        return self._pending is not None
+
     def submit(self, embed, ids):
-        self.drain()
         if self._closed:
             raise RuntimeError("Engram prefetch is closed")
+        host = np.asarray(ids, dtype=np.int64).copy()
         if not isinstance(embed, DiskEngramEmbedding) or embed._resident is not None:
             return
-        host = np.asarray(ids, dtype=np.int64).copy()
+        # A carry read activated by a previous chunk is already exactly the
+        # rows this layer consumes; leave it in place instead of re-reading.
+        pending = embed._prefetched
+        if pending is not None and np.array_equal(pending[0], host):
+            return
+        self.drain()
         if embed.selected_bytes(host.size) + host.nbytes > PREFETCH_BYTES:
             return
         future = self._executor.submit(embed._read_rows, host)
         embed._prefetched = (host, future)
-        self._pending = (embed, future)
+        self._pending = (embed, future, host)
+
+    def submit_carry(self, embed, ids):
+        """Start a next-chunk read without installing it on the embed.
+
+        The row data stays owned by this manager until ``activate()``; the
+        active forward's own ``_prefetched`` slot remains untouched.
+        """
+        if self._closed:
+            raise RuntimeError("Engram prefetch is closed")
+        if self._pending is not None:
+            raise ValueError("Engram carry prefetch already pending")
+        host = np.asarray(ids, dtype=np.int64).copy()
+        if not isinstance(embed, DiskEngramEmbedding) or embed._resident is not None:
+            return False
+        if embed.selected_bytes(host.size) + host.nbytes > PREFETCH_BYTES:
+            return False
+        future = self._executor.submit(embed._read_rows, host)
+        self._pending = (embed, future, host)
+        return True
+
+    def activate(self) -> bool:
+        """Install a completed next-chunk carry as the active embed read."""
+        pending = self._pending
+        if pending is None:
+            return False
+        embed, future, host = pending
+        embed._prefetched = (host, future)
+        return True
 
     def drain(self):
         pending, self._pending = self._pending, None
         if pending is not None:
-            embed, future = pending
-            embed._prefetched = None
+            embed, future, _ = pending
+            installed = embed._prefetched
+            if installed is not None and installed[1] is future:
+                embed._prefetched = None
             if not future.cancel():
                 future.result()
 
