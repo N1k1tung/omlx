@@ -296,10 +296,12 @@ def _tensor_location(path, key):
 def copy_engram(
     source, destination, table, *, module_name, chunk_bytes=64 << 20, progress=None
 ):
-    """Copy a table's stored bytes unchanged under the converted key names.
+    """Copy a table's stored bytes unchanged, interleaved per FP8 row.
 
     The official FP8 table keeps its E4M3 values and one E8M0 scale per 32
-    channels, which DiskEngramEmbedding decodes like the source checkpoint.
+    channels. Writing each row as ``values || scales`` gives 264 bytes for the
+    1017 shape instead of two separate tensor ranges, so a selected row faults
+    one SSD page rather than one page in each range. Decoding is unchanged.
     """
     if table.get("bias_key"):
         raise ValueError("Engram table is already quantized: copy is unsupported")
@@ -322,46 +324,151 @@ def copy_engram(
         ):
             raise ValueError("Only FP8 Engram tables with E8M0 block scales copy")
         mode = "mxfp8"
-    header, offset = {}, 0
-    for name, _, entry, _, length in located:
-        header[f"{module_name}.{name}"] = {
-            "dtype": entry["dtype"],
-            "shape": entry["shape"],
-            "data_offsets": [offset, offset + length],
+    if mode is None:
+        header, offset = {}, 0
+        for name, _, entry, _, length in located:
+            header[f"{module_name}.{name}"] = {
+                "dtype": entry["dtype"],
+                "shape": entry["shape"],
+                "data_offsets": [offset, offset + length],
+            }
+            offset += length
+        header["__metadata__"] = {"format": "mlx"}
+        encoded = json.dumps(header, separators=(",", ":")).encode()
+        encoded += b" " * (-len(encoded) % 8)
+        partial = destination.with_suffix(destination.suffix + ".partial")
+        done = 0
+        with partial.open("xb") as out:
+            out.write(struct.pack("<Q", len(encoded)))
+            out.write(encoded)
+            for _, path, _, start, length in located:
+                with path.open("rb") as f:
+                    f.seek(start)
+                    remaining = length
+                    while remaining:
+                        data = f.read(min(chunk_bytes, remaining))
+                        if not data:
+                            raise ValueError(f"Truncated Engram source: {path.name}")
+                        out.write(data)
+                        remaining -= len(data)
+                        done += len(data)
+                        if progress is not None:
+                            progress(done, offset)
+        partial.rename(destination)
+        return {
+            "weight_file": destination.name,
+            "weight_key": f"{module_name}.weight",
+            "group_size": 32,
         }
-        offset += length
-    header["__metadata__"] = {"format": "mlx"}
+
+    row_bytes = width + width // 32
+    total = rows * row_bytes
+    packed_key = f"{module_name}.packed"
+    header = {
+        packed_key: {
+            "dtype": "U8",
+            "shape": [rows, row_bytes],
+            "data_offsets": [0, total],
+        },
+        "__metadata__": {"format": "mlx"},
+    }
     encoded = json.dumps(header, separators=(",", ":")).encode()
     encoded += b" " * (-len(encoded) % 8)
+    data_start = 8 + len(encoded)
     partial = destination.with_suffix(destination.suffix + ".partial")
-    done = 0
-    with partial.open("xb") as out:
-        out.write(struct.pack("<Q", len(encoded)))
-        out.write(encoded)
-        for _, path, _, start, length in located:
-            with path.open("rb") as f:
-                f.seek(start)
-                remaining = length
-                while remaining:
-                    data = f.read(min(chunk_bytes, remaining))
-                    if not data:
-                        raise ValueError(f"Truncated Engram source: {path.name}")
-                    out.write(data)
-                    remaining -= len(data)
-                    done += len(data)
-                    if progress is not None:
-                        progress(done, offset)
+    weight_file = source / table["weight_file"]
+    scale_file = source / (table.get("scale_file") or table["weight_file"])
+    reader = TensorFile(weight_file)
+    scales = reader if scale_file == weight_file else TensorFile(scale_file)
+    rows_per_chunk = max(1, chunk_bytes // row_bytes)
+    try:
+        with partial.open("xb") as out:
+            out.write(struct.pack("<Q", len(encoded)))
+            out.write(encoded)
+            out.truncate(data_start + total)
+            for start in range(0, rows, rows_per_chunk):
+                stop = min(rows, start + rows_per_chunk)
+                selected = np.arange(start, stop, dtype=np.int64)
+                raw, dtype = reader.read(table["weight_key"], selected)
+                scale_raw, scale_dtype = scales.read(table["scale_key"], selected)
+                if (
+                    dtype != "F8_E4M3"
+                    or scale_dtype != "F8_E8M0"
+                    or raw.shape != (stop - start, width)
+                    or scale_raw.shape != (stop - start, width // 32)
+                ):
+                    raise ValueError("Copied Engram rows differ from their source")
+                packed = np.concatenate([raw, scale_raw], axis=-1)
+                out.seek(data_start + start * row_bytes)
+                out.write(packed.tobytes())
+                if progress is not None:
+                    progress(stop * row_bytes, total)
+    finally:
+        reader.close()
+        if scales is not reader:
+            scales.close()
     partial.rename(destination)
-    spec = {
+    return {
         "weight_file": destination.name,
-        "weight_key": f"{module_name}.weight",
+        "weight_key": packed_key,
+        "packed": True,
+        "packed_width": width,
+        "bits": 8,
         "group_size": 32,
+        "mode": "mxfp8",
     }
-    if mode is not None:
-        spec.update(
-            scale_file=destination.name, scale_key=f"{module_name}.scales", mode=mode
+
+
+def repack_engram_tables(model_path, *, chunk_bytes=64 << 20, progress=None):
+    """Upgrade a converted checkpoint's preserved FP8 Engram tables in place.
+
+    The original source stays untouched. Each table is copied from its separate
+    weight/scale ranges into a new row-interleaved file, then config/index point
+    only at the packed tensor. This avoids re-converting the non-Engram weights;
+    the caller must provide space for the new 188GB Engram files.
+    """
+    path = Path(model_path)
+    config_path = path / "config.json"
+    index_path = path / "model.safetensors.index.json"
+    config = json.loads(config_path.read_text())
+    spec = config.get("omlx_deepseek_v41")
+    if spec is None or spec.get("version") != 1:
+        raise ValueError("Repack requires a converted DeepSeek V4.1 checkpoint")
+    tables = spec.get("engram_tables") or {}
+    if not tables:
+        return 0
+    mapping = json.loads(index_path.read_text())["weight_map"]
+    changed = 0
+    for i, (name, table) in enumerate(tables.items()):
+        if table.get("packed"):
+            continue
+        if table.get("bias_key"):
+            raise ValueError("Affine Engram tables are not row-interleaved")
+        if not table.get("scale_key"):
+            raise ValueError("Only FP8 Engram tables with E8M0 scales repack")
+        destination = path / f".engram-packed-{i:02d}.safetensors"
+        if destination.exists():
+            raise FileExistsError(destination)
+        packed = copy_engram(
+            path,
+            destination,
+            table,
+            module_name=name,
+            chunk_bytes=chunk_bytes,
+            progress=progress,
         )
-    return spec
+        packed["weight_file"] = destination.name
+        for key in (table["weight_key"], table["scale_key"], table.get("bias_key")):
+            if key is not None:
+                mapping.pop(key, None)
+        mapping[packed["weight_key"]] = destination.name
+        tables[name] = packed
+        changed += 1
+    if changed:
+        spec["engram_tables"] = tables
+        config_path.write_text(json.dumps(config, indent=2) + "\n")
+        index_path.write_text(json.dumps({"weight_map": mapping}, indent=2) + "\n")
+    return changed
 
 
 def quantize(

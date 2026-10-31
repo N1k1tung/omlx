@@ -111,20 +111,35 @@ def test_copied_fp8_engram_keeps_source_bytes_and_rows(tmp_path):
 
     assert spec == {
         "weight_file": "engram.safetensors",
-        "weight_key": f"{module}.weight",
-        "scale_file": "engram.safetensors",
-        "scale_key": f"{module}.scales",
+        "weight_key": f"{module}.packed",
+        "packed": True,
+        "packed_width": width,
+        "bits": 8,
         "group_size": 32,
         "mode": "mxfp8",
     }
     copied = tmp_path / "engram.safetensors"
     assert _declared_format(copied) == {"format": "mlx"}
-    assert _tensor_bytes(copied, spec["weight_key"]) == values.tobytes()
-    assert _tensor_bytes(copied, spec["scale_key"]) == scales.tobytes()
+    packed_bytes = np.concatenate([values, scales], axis=-1).tobytes()
+    assert _tensor_bytes(copied, spec["weight_key"]) == packed_bytes
+    raw = copied.read_bytes()
+    header_len = struct.unpack("<Q", raw[:8])[0]
+    packed_entry = json.loads(raw[8 : 8 + header_len])[spec["weight_key"]]
+    assert packed_entry["dtype"] == "U8"
+    assert packed_entry["shape"] == [rows, width + width // 32]
     original = DiskEngramEmbedding(
         tmp_path / "source.safetensors", table["weight_key"], table["scale_key"]
     )
-    exported = DiskEngramEmbedding(copied, spec["weight_key"], spec["scale_key"])
+    exported = DiskEngramEmbedding(
+        copied,
+        spec["weight_key"],
+        None,
+        packed=True,
+        packed_width=width,
+        bits=8,
+    )
+    assert exported._packed and exported._scales is None
+    assert exported.selected_bytes(1) == width + width // 32
     try:
         ids = mx.array([[0, 7, 39], [12, 12, 3]])
         np.testing.assert_array_equal(
@@ -505,6 +520,84 @@ def test_preserved_ngram_table_changes_only_engram_shards(tmp_path):
             )
     finally:
         model.close()
+
+
+def test_repack_existing_engram_tables_upgrades_converted_checkpoint(tmp_path):
+    from test_deepseek_v41 import decode_e4m3, write_checkpoint
+
+    from omlx.patches.deepseek_v41.convert import convert
+    from omlx.patches.deepseek_v41.loading import load
+    from omlx.patches.deepseek_v41.oq import repack_engram_tables
+
+    source, _ = write_checkpoint(
+        tmp_path,
+        vision=False,
+        engram_layer_ids=(1, 3),
+        engram_num_embeddings=(72, 204),
+        engram_vocab_size=5,
+        engram_max_ngram_size=4,
+        engram_n_heads=2,
+        engram_head_dim=32,
+        engram_compressed_vocab_size=64,
+    )
+    mapping = json.loads((source / "model.safetensors.index.json").read_text())[
+        "weight_map"
+    ]
+    rng = np.random.default_rng(11)
+    expected = {}
+    width = 32
+    table_bytes = {}
+    for layer, rows in ((1, 72), (3, 204)):
+        values = rng.integers(0, 256, (rows, width), dtype=np.uint8)
+        values[(values & 0x7F) == 0x7F] = 0
+        scales = rng.integers(118, 136, (rows, width // 32), dtype=np.uint8)
+        weight_key = f"layers.{layer}.engram.embed.weight"
+        scale_key = f"layers.{layer}.engram.embed.scale"
+        table_bytes[weight_key] = ("F8_E4M3", values.shape, values.tobytes())
+        table_bytes[scale_key] = ("F8_E8M0", scales.shape, scales.tobytes())
+        mapping[weight_key] = mapping[scale_key] = "engram.safetensors"
+        expected[layer] = (
+            decode_e4m3(values)
+            .reshape(rows, width // 32, 32)
+            * np.exp2(scales.astype(np.float32) - 127)[..., None]
+        ).reshape(rows, width)
+    _write_raw_safetensors(source / "engram.safetensors", table_bytes)
+    (source / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": mapping})
+    )
+    converted = tmp_path / "converted"
+    convert(source, converted)
+    changed = repack_engram_tables(converted)
+    assert changed == 2
+    saved = json.loads((converted / "config.json").read_text())["omlx_deepseek_v41"]
+    tables = saved["engram_tables"]
+    assert all(table["packed"] and table["packed_width"] == width for table in tables.values())
+    assert all("scale_key" not in table for table in tables.values())
+    mapping = json.loads((converted / "model.safetensors.index.json").read_text())[
+        "weight_map"
+    ]
+    for table in tables.values():
+        assert mapping[table["weight_key"]] == table["weight_file"]
+    model, _ = load(converted, engram_ssd_offload=True)
+    try:
+        for layer, rows in ((1, 72), (3, 204)):
+            embed = model.language_model.layers[layer].engram.embed
+            assert embed._packed
+            np.testing.assert_array_equal(
+                embed(mx.arange(rows)).astype(mx.float32), expected[layer]
+            )
+    finally:
+        model.close()
+    resident, _ = load(converted, engram_ssd_offload=False)
+    try:
+        for layer, rows in ((1, 72), (3, 204)):
+            embed = resident.language_model.layers[layer].engram.embed
+            assert embed._packed and embed._resident is not None
+            np.testing.assert_array_equal(
+                embed(mx.arange(rows)).astype(mx.float32), expected[layer]
+            )
+    finally:
+        resident.close()
 
 
 @pytest.mark.parametrize("bits", [2, 3, 4, 6, 8])
