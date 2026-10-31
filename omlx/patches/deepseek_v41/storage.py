@@ -349,26 +349,51 @@ class DiskEngramEmbedding(nn.Module):
         bias_key=None,
         bits=None,
         group_size=32,
+        packed=False,
+        packed_width=None,
     ):
         super().__init__()
         self._lock = RLock()
         self._weights = TensorFile(path)
+        self._packed = packed
+        self._packed_width = packed_width
+        self._scales = None
         try:
-            self._scales = (
-                self._weights
-                if scale_path is None or Path(scale_path) == Path(path)
-                else TensorFile(scale_path)
-            )
+            if packed:
+                if bias_key is not None or bits != 8 or group_size != 32:
+                    raise ValueError("Packed Engram requires FP8 GS32 without biases")
+                entry = self._weights.header[weight_key]
+                if entry["dtype"] != "U8" or len(entry["shape"]) != 2:
+                    raise ValueError("Packed Engram tensor must be rank-two U8")
+                row_bytes = int(entry["shape"][1])
+                width = packed_width
+                if width is None:
+                    width = row_bytes * 32 // 33
+                width = int(width)
+                if width <= 0 or width % 32 or row_bytes != width + width // 32:
+                    raise ValueError("Packed Engram row geometry mismatch")
+                self._packed_width = width
+            else:
+                self._scales = (
+                    self._weights
+                    if scale_path is None or Path(scale_path) == Path(path)
+                    else TensorFile(scale_path)
+                )
         except Exception:
             self._weights.close()
+            if self._scales is not None and self._scales is not self._weights:
+                self._scales.close()
             raise
         self._weight_key, self._scale_key = weight_key, scale_key
-        self._bias_key, self._bits, self._group_size = bias_key, bits, group_size
-        if (bits is None) != (bias_key is None) or (
+        self._bias_key = bias_key
+        self._bits = None if packed else bits
+        self._group_size = group_size
+        if not packed and ((bits is None) != (bias_key is None) or (
             bits is not None and scale_key is None
-        ):
+        )):
             self._weights.close()
-            self._scales.close()
+            if self._scales is not None and self._scales is not self._weights:
+                self._scales.close()
             raise ValueError("Affine Engram requires bits, scales and biases")
         self._closed = False
         self._resident = None
@@ -377,6 +402,15 @@ class DiskEngramEmbedding(nn.Module):
     def make_resident(self):
         """Keep packed tensors in Metal-managed RAM with shared CPU views."""
         with self._lock:
+            if self._packed:
+                resident = {
+                    self._weight_key: self._weights.read(
+                        self._weight_key, metal_backed=True
+                    ),
+                }
+                self._resident = resident
+                self._weights.close()
+                return
             resident = {
                 self._weight_key: self._weights.read(
                     self._weight_key, metal_backed=True
@@ -396,6 +430,11 @@ class DiskEngramEmbedding(nn.Module):
                 self._scales.close()
 
     def selected_bytes(self, rows):
+        if self._packed:
+            entry = self._weights.header[self._weight_key]
+            return (entry["data_offsets"][1] - entry["data_offsets"][0]) // entry[
+                "shape"
+            ][0] * rows
         total = 0
         for reader, key in (
             (self._weights, self._weight_key),
@@ -412,6 +451,22 @@ class DiskEngramEmbedding(nn.Module):
         with self._lock:
             if self._closed:
                 raise RuntimeError("Engram embedding is closed")
+            if self._packed:
+                rows = host.reshape(-1)
+                if self._resident is None:
+                    raw, dtype = self._weights.read(self._weight_key, rows)
+                else:
+                    raw, dtype = self._resident[self._weight_key]
+                    if rows.size and (rows.min() < 0 or rows.max() >= raw.shape[0]):
+                        raise IndexError("Engram row outside table")
+                    raw = raw[rows]
+                width = self._packed_width
+                if dtype != "U8" or raw.shape[-1] != width + width // 32:
+                    raise ValueError("Packed Engram row geometry mismatch")
+                return [
+                    (raw[..., :width], "F8_E4M3"),
+                    (raw[..., width:], "F8_E8M0"),
+                ]
             result = []
             for reader, key in (
                 (self._weights, self._weight_key),
@@ -455,6 +510,11 @@ class DiskEngramEmbedding(nn.Module):
             values = (
                 values.reshape(values.shape[0], -1, 32) * scales[..., None]
             ).reshape(values.shape)
+        elif self._packed:
+            scales = decode_array(*data[1])
+            values = (
+                values.reshape(values.shape[0], -1, 32) * scales[..., None]
+            ).reshape(values.shape)
         return values.reshape(*host.shape, values.shape[-1]).astype(mx.bfloat16)
 
     def close(self):
@@ -462,7 +522,7 @@ class DiskEngramEmbedding(nn.Module):
             self._closed = True
             self._resident = None
             self._weights.close()
-            if self._scales is not self._weights:
+            if self._scales is not None and self._scales is not self._weights:
                 self._scales.close()
 
 

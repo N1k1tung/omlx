@@ -237,6 +237,8 @@ def load(
                     bias_key=spec.get("bias_key"),
                     bits=spec.get("bits"),
                     group_size=spec.get("group_size", 32),
+                    packed=spec.get("packed", False),
+                    packed_width=spec.get("packed_width"),
                 ),
             )
         if format_spec.get("engram_tables"):
