@@ -825,6 +825,36 @@ def test_engram_gate_matches_official(expected):
     np.testing.assert_array_equal(actual[:, 1], h[:, 1])
 
 
+@pytest.mark.parametrize("dim", [32, 512, 1024, 1025, 5120])
+@pytest.mark.parametrize("dtype", [mx.bfloat16, mx.float16, mx.float32])
+def test_fused_engram_gate_is_exact(dim, dtype):
+    from omlx.patches.deepseek_v41.engram import engram_gate_reference, fused_engram_gate
+
+    rng = np.random.default_rng(41)
+    hc = 4
+    hidden = rng.normal(size=(2, 17, hc, dim)).astype(np.float32)
+    hidden[:, 0] = 0
+    projected = rng.normal(size=(11, (hc + 1) * dim)).astype(np.float32)
+    projected[0, :hc * dim] = 0
+    h, kv = mx.array(hidden, dtype), mx.array(projected, dtype)
+    inverse = (np.arange(34) % 11).reshape(2, 17)
+    q_weight = mx.array(rng.normal(size=(hc, dim)).astype(np.float32))
+    k_weight = mx.array(rng.normal(size=(hc, dim)).astype(np.float32))
+    image_mask = np.zeros((2, 17), dtype=bool)
+    image_mask[:, 3] = True
+    expected = engram_gate_reference(
+        h, kv[mx.array(inverse)], q_weight, k_weight, 1e-20, dim, hc,
+        mx.array(image_mask),
+    )
+    actual = fused_engram_gate(
+        h, kv, inverse, q_weight, k_weight, 1e-20, dim, hc,
+        mx.array(image_mask),
+    )
+    assert actual is not None
+    assert mx.array_equal(actual, expected).item()
+    assert mx.array_equal(actual[:, 3], h[:, 3]).item()
+
+
 def test_prefill_engram_dedupe_and_fused_gate_match_reference(monkeypatch):
     from mlx.nn import Module
 
