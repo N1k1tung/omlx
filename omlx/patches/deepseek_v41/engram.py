@@ -156,7 +156,7 @@ inline float v41_engram_sigmoid(float g) {
     return g < 0 ? neg : 1.0f - neg;
 }
 inline float v41_engram_rsqrt_mean(float sumsq, float n, float eps) {
-    return 1.0f / metal::precise::sqrt(sumsq / n + eps);
+    return metal::precise::rsqrt(sumsq * (1.0f / n) + eps);
 }
 """
 
@@ -172,17 +172,21 @@ _GATE_SOURCE = r"""
     const uint krow = kv_row * (HC + 1) * D + c * D;
     const uint vrow = kv_row * (HC + 1) * D + HC * D;
 
-    threadgroup float part[8][3];
+    threadgroup float part[TG / 32][3];
     float sx = 0.0f, sk = 0.0f, dot = 0.0f;
-    for (uint t = 0; t < (D + 255) / 256; ++t) {
-        const uint d = tid + 256 * t;
-        if (d < D) {
-            const float x = float(h[hrow + d]);
-            const float key = float(kv[krow + d]);
-            const float w = q_weight[c * D + d] * k_weight[c * D + d];
-            sx += x * x;
-            sk += key * key;
-            dot += x * w * key;
+    // Match MLX's row reduction: adjacent reads per thread, then SIMD sums.
+    constexpr uint reads = D <= 64 ? D : 4;
+    for (uint t = 0; t < (D + TG * reads - 1) / (TG * reads); ++t) {
+        for (uint j = 0; j < reads; ++j) {
+            const uint d = tid * reads + TG * reads * t + j;
+            if (d < D) {
+                const float x = float(h[hrow + d]);
+                const float key = float(kv[krow + d]);
+                const float w = q_weight[c * D + d] * k_weight[c * D + d];
+                sx += x * x;
+                sk += key * key;
+                dot += x * w * key;
+            }
         }
     }
     sx = simd_sum(sx);
@@ -195,9 +199,9 @@ _GATE_SOURCE = r"""
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (simd == 0) {
-        float xsum = lane < 8 ? part[lane][0] : 0.0f;
-        float ksum = lane < 8 ? part[lane][1] : 0.0f;
-        float dsum = lane < 8 ? part[lane][2] : 0.0f;
+        float xsum = lane < TG / 32 ? part[lane][0] : 0.0f;
+        float ksum = lane < TG / 32 ? part[lane][1] : 0.0f;
+        float dsum = lane < TG / 32 ? part[lane][2] : 0.0f;
         xsum = simd_sum(xsum);
         ksum = simd_sum(ksum);
         dsum = simd_sum(dsum);
@@ -213,7 +217,7 @@ _GATE_SOURCE = r"""
     if (tid == 0) {
         const float rx = v41_engram_rsqrt_mean(part[0][0], float(D), eps[0]);
         const float rk = v41_engram_rsqrt_mean(part[0][1], float(D), eps[0]);
-        const float scaled = part[0][2] * rx * rk * scalep[0];
+        const float scaled = part[0][2] * (rx * rk) * scalep[0];
         float gate = 0.0f;
         if (!(MASK && mask[token] != 0)) {
             if (scaled == 0.0f) {
@@ -229,8 +233,8 @@ _GATE_SOURCE = r"""
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     const float gate = gatev[0];
-    for (uint t = 0; t < (D + 255) / 256; ++t) {
-        const uint d = tid + 256 * t;
+    for (uint t = 0; t < (D + TG - 1) / TG; ++t) {
+        const uint d = tid + TG * t;
         if (d < D) {
             out[hrow + d] = T(float(h[hrow + d]) + gate * float(kv[vrow + d]));
         }
@@ -291,8 +295,7 @@ def fused_engram_gate(
 
     ``kv`` is [unique tuples, (hc + 1) * dim], ``inverse`` maps every token to
     its unique tuple. Avoids materialising key/value in FP32 and gathering the
-    full kv matrix; the gate arithmetic remains FP32 with the reference's
-    precise sqrt/sigmoid and no contracted multiply-add.
+    full kv matrix; FP32 reductions and arithmetic match the reference.
     """
     if (
         mx.default_device() != mx.gpu
@@ -311,6 +314,8 @@ def fused_engram_gate(
         else mx.zeros((1, 1), mx.uint8)
     )
     rows = h.size // dim
+    # Keep in sync with MLX 0.32.4's threadgroup_size_from_row_size.
+    threads = 32 if dim <= 512 else 128 if dim <= 1024 else min(1024, (dim + 127) // 128 * 32)
     return _gate_kernel()(
         inputs=[
             h,
@@ -326,10 +331,11 @@ def fused_engram_gate(
             ("T", h.dtype),
             ("HC", hc),
             ("D", dim),
+            ("TG", threads),
             ("MASK", image_mask is not None),
         ],
-        grid=(rows * 256, 1, 1),
-        threadgroup=(256, 1, 1),
+        grid=(rows * threads, 1, 1),
+        threadgroup=(threads, 1, 1),
         output_shapes=[h.shape],
         output_dtypes=[h.dtype],
     )[0]
