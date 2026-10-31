@@ -157,7 +157,6 @@ def routed_experts_a8(experts, x, flat, order, weights, min_tokens):
         up=(w3.weight, w3.scales, w3.biases),
         swiglu_limit=experts._limit or None,
         route_weights=weights.reshape(-1)[order],
-        group_scales=True,
     )
     if hidden is None:
         return None
@@ -170,5 +169,4 @@ def routed_experts_a8(experts, x, flat, order, weights, min_tokens):
         mx.arange(indices.size, dtype=mx.uint32),
         group_size=64,
         bits=w2.bits,
-        group_scales=True,
     )
