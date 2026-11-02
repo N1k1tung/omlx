@@ -5357,6 +5357,108 @@ class TestFileSelection:
         assert part["mmproj"] == "mmproj-BF16.gguf"
         assert not any(row["required"] for row in gguf)
 
+    def test_multi_precision_repo_locks_only_the_default_checkpoint(self):
+        names = [
+            "config.json",
+            "model-00001-of-00003.safetensors",
+            "model.safetensors.index.json",
+            "tokenizer.json",
+            "README.md",
+            "2-bit/config.json",
+            "2-bit/model.safetensors",
+            "4-bit/config.json",
+            "4-bit/model-00001-of-00003.safetensors",
+            "8-bit/config.json",
+            "8-bit/model.safetensors",
+            "mtp/config.json",
+            "mtp/model.safetensors",
+        ]
+        files = [{"name": name, "size": 1} for name in names]
+
+        assert hf_downloader_mod._describe_repo_files(files, None) == "safetensors"
+
+        rows = {row["name"]: row for row in files}
+        locked = {name for name, row in rows.items() if row["required"]}
+        # The root copy is the checkpoint the repo serves by default; the
+        # alternate precisions are selectable but no longer locked in. `mtp/`
+        # is a sidecar, not another precision, so it keeps its old treatment.
+        assert locked == {
+            "config.json",
+            "model-00001-of-00003.safetensors",
+            "model.safetensors.index.json",
+            "tokenizer.json",
+            "mtp/config.json",
+            "mtp/model.safetensors",
+        }
+        for folder in ("2-bit/", "4-bit/", "8-bit/"):
+            assert not [
+                name
+                for name in rows
+                if name.startswith(folder) and rows[name]["preselected"]
+            ]
+
+    @pytest.mark.asyncio
+    async def test_download_all_size_counts_every_precision_folder(self, tmp_path):
+        sizes = {
+            "config.json": 1,
+            "model.safetensors": 100,
+            "pytorch_model.bin": 1000,
+            "4-bit/config.json": 1,
+            "4-bit/model.safetensors": 50,
+            "8-bit/config.json": 1,
+            "8-bit/model.safetensors": 200,
+        }
+        (tmp_path / "config.json").write_bytes(b"x")
+        info = MagicMock()
+        info.safetensors = {"parameters": {"BF16": 100}, "total": 100}
+        info.siblings = [_sibling(name, size) for name, size in sizes.items()]
+
+        with (
+            patch("omlx.admin.hf_downloader.HfApi") as api_cls,
+            patch("omlx.admin.hf_downloader.hf_hub_download", side_effect=Exception()),
+        ):
+            api_cls.return_value.model_info.return_value = info
+            result = await HFDownloader.get_model_info("org/m", local_dir=tmp_path)
+
+        # Download All fetches the whole repo, not only the preselected
+        # checkpoint; the local config.json and the .bin copy are not fetched.
+        assert result["download_all_size"] == 100 + 51 + 201
+
+    def test_lone_precision_folder_still_locks_its_files(self):
+        files = [
+            {"name": name, "size": 1}
+            for name in (
+                "README.md",
+                "4-bit/config.json",
+                "4-bit/model.safetensors",
+                "4-bit/tokenizer.json",
+            )
+        ]
+
+        hf_downloader_mod._describe_repo_files(files, None)
+
+        rows = {row["name"]: row for row in files}
+        assert {
+            name
+            for name, row in rows.items()
+            if row["required"] and not name.startswith("README")
+        } == {"4-bit/config.json", "4-bit/model.safetensors", "4-bit/tokenizer.json"}
+
+    def test_ambiguous_checkpoint_layout_keeps_everything_required(self):
+        names = [
+            "2-bit/config.json",
+            "2-bit/model.safetensors",
+            "8-bit/config.json",
+            "8-bit/model.safetensors",
+        ]
+        files = [{"name": name, "size": 1} for name in names]
+
+        hf_downloader_mod._describe_repo_files(files, None)
+
+        # No root weights and two sibling folders: which one the repo means is
+        # unknowable from the file list, so nothing is dropped.
+        assert [row["name"] for row in files if row["required"]] == names
+
     def test_split_variants_group_their_parts_and_skip_draft_folders(self):
         files = [
             {"name": name, "size": 1}

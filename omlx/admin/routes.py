@@ -55,7 +55,14 @@ from ..engine.splash import (
 from ..engine.splash import (
     scan_ssd_cache as scan_splash_ssd_cache,
 )
-from ..exceptions import ModelBusyError
+from ..exceptions import (
+    InsufficientMemoryError,
+    ModelBusyError,
+    ModelLoadingError,
+    ModelNotFoundError,
+    ModelTooLargeError,
+    ModelUnavailableError,
+)
 from ..model_discovery import (
     REASONING_EFFORT_LEVELS,
     _is_hf_cache_mlx_compatible,
@@ -2270,8 +2277,11 @@ async def list_grammar_parsers(is_admin: bool = Depends(require_admin)):
 _OMLX_THINKING_TOGGLE_TYPES = ("deepseek_v4", "minimax_m3")
 
 
-def _reasoning_levels(model_info: dict, model_type: str, forced: bool) -> list[str]:
+def reasoning_levels(model_info: dict) -> list[str]:
     """Return the chat reasoning slider stops, or [] when the model has none."""
+    model_type = (model_info.get("config_model_type") or "").lower().replace("-", "_")
+    # K2 Horizon always thinks, so it has no "off" stop.
+    forced = model_type == "k2_horizon"
     toggle = model_info.get("thinking_default") is not None or model_type.startswith(
         _OMLX_THINKING_TOGGLE_TYPES
     )
@@ -2314,7 +2324,7 @@ def _model_options(model_info: dict, settings) -> dict:
         ),
         "reasoning_effort_default": "high" if is_k2 else "low",
         "reasoning_effort_custom": not is_k2,
-        "reasoning_levels": _reasoning_levels(model_info, model_type, is_k2),
+        "reasoning_levels": reasoning_levels(model_info),
         "ane_prefill_backend": ane_backend,
         "ane_prefill_default_fraction": ane_prefill_fraction(None, model_type),
         "ane_prefill_mlp_fractions": [1 / 3, 0.5] if ane_backend == "k2" else [],
@@ -2526,6 +2536,7 @@ async def list_models(is_admin: bool = Depends(require_admin)):
             "engine_type": model_info.get("engine_type", "batched"),
             "model_type": model_info.get("model_type", "llm"),
             "config_model_type": model_info.get("config_model_type", ""),
+            "realtime_voice": bool(model_info.get("realtime_voice")),
             # Native context window from the model's config.json — used by
             # the context bench UI to hide targets the model cannot reach.
             "model_context_length": model_info.get("model_context_length"),
@@ -2708,7 +2719,16 @@ async def load_model(
 
     try:
         await engine_pool.get_engine(model_id)
+    except ModelNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except (ModelTooLargeError, InsufficientMemoryError) as e:
+        # Both mean "cannot fit": too large for the ceiling, or no room even
+        # after eviction. Same mapping as the inference path in server.py.
+        raise HTTPException(status_code=507, detail=str(e))
+    except (ModelUnavailableError, ModelLoadingError, ModelBusyError) as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:
+        # Some load failures are not EnginePoolError; keep their reason.
         raise HTTPException(status_code=500, detail=str(e))
 
     logger.info(f"Manually loaded model: {model_id}")

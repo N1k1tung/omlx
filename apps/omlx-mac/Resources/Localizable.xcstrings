@@ -87,6 +87,12 @@
       "comment" : "Product name used as the app logo accessibility label and the About screen title",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "oMLX"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -105,6 +111,12 @@
       "comment" : "Tooltip on the code chip explaining that clicking copies the value",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Zum Kopieren klicken"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -1910,6 +1922,12 @@
       "comment" : "Sidebar row label / navigation title for the Appearance section",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Darstellung"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -5830,6 +5848,12 @@
       "comment" : "Back button label",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Zurück"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -5853,6 +5877,12 @@
     "common.cancel" : {
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Abbrechen"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -5894,6 +5924,12 @@
     "common.copy" : {
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Kopieren"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -5918,6 +5954,12 @@
       "comment" : "Tooltip and accessibility label for a button that copies a model identifier",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Modell-ID kopieren"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -5941,6 +5983,12 @@
     "common.create" : {
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Erstellen"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -5964,6 +6012,12 @@
     "common.open" : {
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Öffnen"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -5987,6 +6041,12 @@
     "common.save" : {
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Speichern"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -10617,6 +10677,12 @@
       "comment" : "Thermal severity label shown in the Status screen's System block",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Kritisch"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -10641,6 +10707,12 @@
       "comment" : "Thermal severity label shown in the Status screen's System block",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Erhöht"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -10665,6 +10737,12 @@
       "comment" : "Thermal severity label shown in the Status screen's System block",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Normal"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -10689,6 +10767,12 @@
       "comment" : "Thermal severity label shown in the Status screen's System block",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hoch"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -19535,6 +19619,12 @@
       "comment" : "Status pill label when the server process is alive but not answering health checks",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Antwortet nicht"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -19558,6 +19648,12 @@
     "server.hero.restart" : {
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Neu starten"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -19581,6 +19677,12 @@
     "server.hero.start" : {
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Server starten"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -19604,6 +19706,12 @@
     "server.hero.stop" : {
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Stoppen"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -19628,6 +19736,12 @@
       "comment" : "Hero subtitle while server is running; placeholders are host and port (port is plain integer, no grouping)",
       "extractionState" : "extracted_with_value",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Lauscht auf %1$@:%2$@"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "new",
@@ -19652,6 +19766,12 @@
       "comment" : "Hero subtitle when server is stopped",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Läuft nicht"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -19676,6 +19796,12 @@
       "comment" : "Hero subtitle while server is starting up; placeholders are host and port (port is plain integer, no grouping)",
       "extractionState" : "extracted_with_value",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Startet auf %1$@:%2$@…"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "new",
@@ -19700,6 +19826,12 @@
       "comment" : "Hero subtitle while server is shutting down",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Wird gestoppt…"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -19724,6 +19856,12 @@
       "comment" : "Hero card title on Server and Status screens",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "oMLX-Server"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -19748,6 +19886,12 @@
       "comment" : "Hero card button label shown while the server is transitioning between states",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Arbeitet…"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -21785,7 +21929,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Speeds up decode on Qwen4 oQ2.5e, oQ2.7e, oQ6e, oQ8e and 8-bit community models (about 3-6% on an 8-bit model, up to 1.5 GiB more memory). No effect on oQ3e to oQ4e or fp16 builds, and little effect with Lightning MTP on."
+            "value" : "Speeds up decode on Qwen4 oQ8e and other GDN layouts, such as some older oQ downloads and community models (up to 1.5 GiB more memory). No effect on current oQ2.5e to oQ6e or fp16 builds, and little effect with Lightning MTP on."
           }
         }
       }
@@ -26622,6 +26766,12 @@
     "sidebar.about" : {
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Über"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -26645,6 +26795,12 @@
     "sidebar.accuracyBench" : {
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Genauigkeit"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -26686,6 +26842,12 @@
     "sidebar.contextBench" : {
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Kontext"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -26727,6 +26889,12 @@
     "sidebar.downloads" : {
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Downloads"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -26769,6 +26937,12 @@
       "comment" : "Sidebar group heading for accuracy + throughput bench screens",
       "extractionState" : "extracted_with_value",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Benchmark"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "new",
@@ -26793,6 +26967,12 @@
       "comment" : "Sidebar group heading for the about/integrations/logs screens",
       "extractionState" : "extracted_with_value",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Allgemein"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "new",
@@ -26817,6 +26997,12 @@
       "comment" : "Sidebar group heading for models/downloads/quant screens",
       "extractionState" : "extracted_with_value",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Modelle"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "new",
@@ -26841,6 +27027,12 @@
       "comment" : "Sidebar group heading for server-related screens",
       "extractionState" : "extracted_with_value",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Server"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "new",
@@ -26864,6 +27056,12 @@
     "sidebar.integrations" : {
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Integrationen"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -26887,6 +27085,12 @@
     "sidebar.logs" : {
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Protokolle"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -26928,6 +27132,12 @@
     "sidebar.models" : {
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Modelle"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -26969,6 +27179,12 @@
     "sidebar.network" : {
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Netzwerk"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -27010,6 +27226,12 @@
     "sidebar.performance" : {
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Leistung"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -27051,6 +27273,12 @@
     "sidebar.quantization" : {
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Quantisierung"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -27092,6 +27320,12 @@
     "sidebar.security" : {
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sicherheit"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -27115,6 +27349,12 @@
     "sidebar.server" : {
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Server"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -27156,6 +27396,12 @@
     "sidebar.status" : {
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Status"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -27197,6 +27443,12 @@
     "sidebar.throughputBench" : {
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Durchsatz"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -27239,6 +27491,12 @@
       "comment" : "Active Now badge: model currently generating tokens",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Wird generiert"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -27263,6 +27521,12 @@
       "comment" : "Active Now badge: model is loaded but idle",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Geladen"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -27287,6 +27551,12 @@
       "comment" : "Active Now badge: model has queued requests",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Wartet"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -27311,6 +27581,12 @@
       "comment" : "Empty-state text shown when the Active Now list has no entries",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Server im Leerlauf, keine Modelle geladen"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -27335,6 +27611,12 @@
       "comment" : "Architecture label shown in the System section subtitle for Apple Silicon Macs",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Apple Silicon"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -27359,6 +27641,12 @@
       "comment" : "Architecture label shown in the System section subtitle for Intel Macs",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Intel"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -27383,6 +27671,12 @@
       "comment" : "Tooltip on the clear button when all-time scope is selected",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Gesamtstatistik löschen"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -27407,6 +27701,12 @@
       "comment" : "Tooltip on the clear button when session scope is selected",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sitzungsstatistik löschen"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -27431,6 +27731,12 @@
       "comment" : "Confirmation dialog title for clearing all-time stats",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Gesamtstatistik löschen? Das kann nicht rückgängig gemacht werden."
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -27455,6 +27761,12 @@
       "comment" : "Destructive clear button inside stats clear confirmation dialogs",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Leeren"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -27479,6 +27791,12 @@
       "comment" : "Confirmation dialog title for clearing the hot (memory) KV cache",
       "extractionState" : "extracted_with_value",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Arbeitsspeicher-KV-Cache für alle geladenen Modelle leeren? Nachfolgende Anfragen greifen wieder auf die SSD zu oder berechnen neu."
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "new",
@@ -27503,6 +27821,12 @@
       "comment" : "Confirmation dialog title for clearing session stats",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sitzungsstatistik löschen?"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -27527,6 +27851,12 @@
       "comment" : "Confirmation dialog title for clearing the SSD KV cache",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Alle SSD-Cache-Dateien löschen? Geladene Modelle bauen ihren KV-Cache beim nächsten Prefill neu auf."
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -27551,6 +27881,12 @@
       "comment" : "Row label for GPU wired memory",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Reservierter GPU-Arbeitsspeicher"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -27575,6 +27911,12 @@
       "comment" : "Row label for GPU utilization",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "GPU-Auslastung"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -27599,6 +27941,12 @@
       "comment" : "Sublabel for GPU utilization row",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ungefähr · Last aktiver Anfragen"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -27623,6 +27971,12 @@
       "comment" : "Row label for server uptime",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Server-Betriebszeit"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -27647,6 +28001,12 @@
       "comment" : "Row label for system RAM",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Systemarbeitsspeicher"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -27671,6 +28031,12 @@
       "comment" : "Row label for thermal state",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Thermischer Zustand"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -27695,6 +28061,12 @@
       "comment" : "Row label for the running oMLX version",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "oMLX-Version"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -27719,6 +28091,12 @@
       "comment" : "Subtitle showing the effective KV cache block sizes; placeholder is a separator-joined list of numbers",
       "extractionState" : "extracted_with_value",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Blockgröße · %@"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "new",
@@ -27743,6 +28121,12 @@
       "comment" : "Destructive button to clear the in-memory KV cache",
       "extractionState" : "extracted_with_value",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Arbeitsspeicher-Cache leeren"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "new",
@@ -27767,6 +28151,12 @@
       "comment" : "Destructive button to clear all SSD cache files",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SSD-Cache leeren"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -27791,6 +28181,12 @@
       "comment" : "Cache file count; placeholder is the number of files",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Dateien: %lld"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -27863,6 +28259,12 @@
       "comment" : "Row label for cache file count",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Cache-Dateien"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -27887,6 +28289,12 @@
       "comment" : "Row label for the SSD cache directory path",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Speicherort"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -27911,6 +28319,12 @@
       "comment" : "Warning under the SSD cache location when it was unavailable at server start",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Der SSD-Cache ist aus, weil dieses Verzeichnis beim Start des Servers nicht verfügbar war. Starten Sie den Server nach dem erneuten Verbinden des Laufwerks neu."
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -27935,6 +28349,12 @@
       "comment" : "Row label for the in-memory (hot) KV cache size gauge",
       "extractionState" : "extracted_with_value",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Arbeitsspeicher-Cache"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "new",
@@ -27959,6 +28379,12 @@
       "comment" : "Row label for the number of in-memory KV cache entries",
       "extractionState" : "extracted_with_value",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Arbeitsspeichereinträge"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "new",
@@ -27983,6 +28409,12 @@
       "comment" : "Memory cache entry count; placeholder is the number of entries",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Einträge: %lld"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -28055,6 +28487,12 @@
       "comment" : "Row label for total cache size on disk",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Gesamtgröße"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -28456,6 +28894,12 @@
     "status.scope.alltime" : {
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Gesamt"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -28497,6 +28941,12 @@
     "status.scope.session" : {
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sitzung"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -28539,6 +28989,12 @@
       "comment" : "Section header for the currently active models list",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Jetzt aktiv"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -28563,6 +29019,12 @@
       "comment" : "Section header for the runtime cache observability panel",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Laufzeit-Cache"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -28587,6 +29049,12 @@
       "comment" : "Section header for system status rows",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "System"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -28610,6 +29078,12 @@
     "status.session_stats" : {
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Inferenzstatistik"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -28700,6 +29174,12 @@
       "comment" : "Tile label for average prompt-processing speed excluding cached tokens",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Prompt-Verarbeitung (ohne Cache)"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -28724,6 +29204,12 @@
       "comment" : "Header label above average serving speed metrics",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Durchschnittliche Geschwindigkeit"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -28748,6 +29234,12 @@
       "comment" : "Label for average token-generation speed",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Token-Generierung"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -28772,6 +29264,12 @@
       "comment" : "Subtitle of the System section showing CPU architecture and macOS version; placeholders are the architecture string and macOS major.minor numbers",
       "extractionState" : "extracted_with_value",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@ · macOS %2$lld.%3$lld"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "new",
@@ -28796,6 +29294,12 @@
       "comment" : "Stat tile label for cache efficiency percentage",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Cache-Effizienz"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -28819,6 +29323,12 @@
     "status.tile.cached" : {
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Token im Cache"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -28912,6 +29422,12 @@
     "status.tile.total" : {
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Prefill-Token insgesamt"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -28960,6 +29476,12 @@
       "comment" : "Row label for the auto-check updates toggle",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Automatisch prüfen"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -28984,6 +29506,12 @@
       "comment" : "Sublabel for the auto-check toggle",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Täglich im Hintergrund nach Updates suchen"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -29008,6 +29536,12 @@
       "comment" : "Row label for the automatic update notification toggle",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Über Updates informieren"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -29032,6 +29566,12 @@
       "comment" : "Sublabel for the automatic update notification toggle",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Versionshinweise anzeigen, wenn ein Update gefunden wird"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -29056,6 +29596,12 @@
       "comment" : "Primary update status line when a new version is available; placeholder is the version string",
       "extractionState" : "extracted_with_value",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "oMLX %@ ist verfügbar"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "new",
@@ -29080,6 +29626,12 @@
       "comment" : "Secondary update status line when a new version is available; placeholder is the download size or em dash",
       "extractionState" : "extracted_with_value",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Bereit zum Download · %@"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "new",
@@ -29104,6 +29656,12 @@
       "comment" : "Row label for the toggle that downloads found updates in the background",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Automatisch laden"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -29128,6 +29686,12 @@
       "comment" : "Sublabel for the background update download toggle",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Im Hintergrund laden und vor dem Installieren nachfragen"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -29152,6 +29716,12 @@
       "comment" : "Row label for the update channel picker",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Update-Kanal"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -29176,6 +29746,12 @@
       "comment" : "Sublabel for the update channel picker",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Stable erhält getestete Versionen. Beta bekommt neue Funktionen früher."
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -29199,6 +29775,12 @@
     "status.updates.check" : {
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Jetzt prüfen"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -29223,6 +29805,12 @@
       "comment" : "Updates action button label while a check is in progress",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Wird geprüft…"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -29247,6 +29835,12 @@
       "comment" : "Primary update status line while a check is in progress",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Suche nach Updates…"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -29271,6 +29865,12 @@
       "comment" : "Secondary update status line while a check is in progress",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "GitHub-Releases werden geprüft…"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -29295,6 +29895,12 @@
       "comment" : "Updates action button label while the download is in progress; placeholder is the percent complete",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Wird geladen… %lld%%"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -29319,6 +29925,12 @@
       "comment" : "Primary update status line while the new build is downloading",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Update wird geladen…"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -29343,6 +29955,12 @@
       "comment" : "Secondary update status line during download; placeholder is the percent complete",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Wird geladen · %lld%%"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -29367,6 +29985,12 @@
       "comment" : "Primary update status line when checking for updates failed",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Update-Prüfung fehlgeschlagen"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -29390,6 +30014,12 @@
     "status.updates.install" : {
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Installieren und neu starten"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -29414,6 +30044,12 @@
       "comment" : "Last-checked text when the last check was before today; placeholder is the formatted date and time",
       "extractionState" : "extracted_with_value",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Zuletzt geprüft: %@"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "new",
@@ -29438,6 +30074,12 @@
       "comment" : "Last-checked text when the last check was today; placeholder is the local time",
       "extractionState" : "extracted_with_value",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Heute um %@ geprüft"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "new",
@@ -29462,6 +30104,12 @@
       "comment" : "Secondary update line when there is no prior check timestamp",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Noch nie geprüft"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -29486,6 +30134,12 @@
       "comment" : "Secondary update status line once the staged bundle is ready; placeholder is the version",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ kann installiert werden"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -29509,6 +30163,12 @@
     "status.updates.title" : {
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Updates"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -29533,6 +30193,12 @@
       "comment" : "Primary update status line when no update is available",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "oMLX ist aktuell"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -29557,6 +30223,12 @@
       "comment" : "Version row value combining marketing version and build number; placeholders are the version string and build string",
       "extractionState" : "extracted_with_value",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@ · Build %2$@"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "new",
@@ -29581,6 +30253,12 @@
       "comment" : "Section header for the local usage history panel",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Nutzungsverlauf"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -29605,6 +30283,12 @@
       "comment" : "Subtitle under the usage history header describing data scope",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Lokale Aggregate · Serverzeit · 400 Tage Aufbewahrung"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -29629,6 +30313,12 @@
       "comment" : "Picker label for the usage history time range",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Zeitraum"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -29653,6 +30343,12 @@
       "comment" : "Usage history range option",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Heute"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -29677,6 +30373,12 @@
       "comment" : "Usage history range option",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Gestern"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -29701,6 +30403,12 @@
       "comment" : "Usage history range option",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "7 Tage"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -29725,6 +30433,12 @@
       "comment" : "Usage history range option",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "30 Tage"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -29749,6 +30463,12 @@
       "comment" : "Usage history range option",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "90 Tage"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -29773,6 +30493,12 @@
       "comment" : "Usage history range option for the current calendar month",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Dieser Monat"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -29797,6 +30523,12 @@
       "comment" : "Picker label for the usage history model filter",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Modell"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -29821,6 +30553,12 @@
       "comment" : "Usage history model filter option that includes every model",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Alle Modelle"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -29845,6 +30583,12 @@
       "comment" : "Shown when the selected usage history range has no recorded requests",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Keine aufgezeichnete Nutzung in diesem Zeitraum. Der Verlauf beginnt nach dem Upgrade."
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -29869,6 +30613,12 @@
       "comment" : "Warning shown when usage history storage is degraded but data is still displayed",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Der Verlauf ist möglicherweise unvollständig: Die Speicherung ist verzögert oder der Wartepuffer ist übergelaufen."
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -29893,6 +30643,12 @@
       "comment" : "Error shown when the usage history endpoint cannot be reached",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Der Nutzungsverlauf ist nicht verfügbar. Die Inferenz läuft normal weiter."
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -29917,6 +30673,12 @@
       "comment" : "Shown on the Status screen when usage history recording is switched off",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Der Nutzungsverlauf ist aus. Aktivieren Sie ihn in den Server-Einstellungen."
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -29941,6 +30703,12 @@
       "comment" : "Button that jumps from the Status screen to the usage history switch on the Server screen",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Server-Einstellungen öffnen"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -29965,6 +30733,12 @@
       "comment" : "Usage history tile label for request count",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Anfragen"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -29989,6 +30763,12 @@
       "comment" : "Usage history tile label for prompt plus output tokens",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Token insgesamt"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -30013,6 +30793,12 @@
       "comment" : "Usage history tile label for prompt tokens",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Prompt-Token"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -30037,6 +30823,12 @@
       "comment" : "Usage history tile label for generated tokens",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ausgabe-Token"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -30061,6 +30853,12 @@
       "comment" : "Usage history tile label for prompt tokens served from cache",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Token im Cache"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -30085,6 +30883,12 @@
       "comment" : "Heading above the usage history day/hour heatmap",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Token-Nutzung nach Tag und Stunde"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -30109,6 +30913,12 @@
       "comment" : "Legend text under the usage heatmap heading",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Stunden 00–23 · dunkleres Grün bedeutet mehr Token · doppelte Stunden bei der Zeitumstellung werden zusammengefasst"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -30133,6 +30943,12 @@
       "comment" : "Per-model total token count; placeholder is a compact number",
       "extractionState" : "extracted_with_value",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ Token"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "new",
@@ -30157,6 +30973,12 @@
       "comment" : "Per-model request count and output speed; placeholders are a count and a formatted tokens-per-second value",
       "extractionState" : "extracted_with_value",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$lld Anfragen · %2$@ Token/s"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "new",
@@ -30181,6 +31003,12 @@
       "comment" : "Per-model breakdown sublabel; placeholders are compact prompt, output, and cached token counts",
       "extractionState" : "extracted_with_value",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Prompt %1$@ · Ausgabe %2$@ · Cache %3$@"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "new",
@@ -30205,6 +31033,12 @@
       "comment" : "Tooltip and accessibility label for one heatmap cell; placeholders are the date, the two-digit hour, and a formatted token count",
       "extractionState" : "extracted_with_value",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@ %2$@:00 · %3$@ Token"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "new",
@@ -32125,6 +32959,12 @@
       "comment" : "Generic close button",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Schließen"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -33015,6 +33855,54 @@
         }
       }
     },
+    "askai.hint.idle.enter" : {
+      "comment" : "Key hints in the Ask AI footer before the first question when Enter sends",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "↩ Send   ⇧↩ Newline   Esc Close"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "↩ Отправить   ⇧↩ Перенос   Esc Закрыть"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "↩ 发送   ⇧↩ 换行   Esc 关闭"
+          }
+        }
+      }
+    },
+    "askai.hint.conversation.enter" : {
+      "comment" : "Key hints in the Ask AI footer after an answer when Enter sends",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "↩ Follow up   ⇧↩ Newline   ⌘N New   ⇧⌘C Copy"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "↩ Уточнить   ⇧↩ Перенос   ⌘N Новый   ⇧⌘C Копировать"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "↩ 追问   ⇧↩ 换行   ⌘N 新对话   ⇧⌘C 复制"
+          }
+        }
+      }
+    },
     "askai.turn.stopped" : {
       "comment" : "Marker under an Ask AI answer that was stopped early",
       "extractionState" : "manual",
@@ -33304,7 +34192,7 @@
       }
     },
     "askai.section.general" : {
-      "comment" : "Section header for the Ask AI switch and hotkey",
+      "comment" : "Section header for the Ask AI text and voice switches",
       "extractionState" : "manual",
       "localizations" : {
         "en" : {
@@ -33328,49 +34216,49 @@
       }
     },
     "askai.row.enabled" : {
-      "comment" : "Row label for the Ask AI feature switch",
+      "comment" : "Row label for the switch that enables asking Ask AI by text",
       "extractionState" : "manual",
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Enable Ask AI"
+            "value" : "Enable Text"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Включить Ask AI"
+            "value" : "Включить текст"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "启用 Ask AI"
+            "value" : "启用文字"
           }
         }
       }
     },
     "askai.row.enabled.sub" : {
-      "comment" : "Sublabel for the Ask AI feature switch",
+      "comment" : "Sublabel for the Ask AI text switch",
       "extractionState" : "manual",
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Open a question bar from any app with a global shortcut."
+            "value" : "Type a question from any app with a global shortcut."
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Открывайте строку вопросов из любого приложения глобальным сочетанием клавиш."
+            "value" : "Задавайте вопросы текстом из любого приложения по глобальному сочетанию клавиш."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "在任意应用中用全局快捷键打开提问栏。"
+            "value" : "在任意应用中通过全局快捷键输入问题。"
           }
         }
       }
@@ -33519,6 +34407,54 @@
         }
       }
     },
+    "askai.row.send_on_enter" : {
+      "comment" : "Row label for the Ask AI Enter-to-send switch",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Send on Enter"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Отправка по Enter"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "回车发送"
+          }
+        }
+      }
+    },
+    "askai.row.send_on_enter.sub" : {
+      "comment" : "Sublabel for the Ask AI Enter-to-send switch",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Enter sends the question and ⇧↩ adds a new line. ⌘↩ always sends."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Enter отправляет вопрос, ⇧↩ добавляет новую строку. ⌘↩ всегда отправляет."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "回车发送问题，⇧↩ 换行。⌘↩ 始终发送。"
+          }
+        }
+      }
+    },
     "askai.new_conversation.5m" : {
       "comment" : "Ask AI option: new conversation after 5 idle minutes",
       "extractionState" : "manual",
@@ -33563,54 +34499,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "15 分钟"
-          }
-        }
-      }
-    },
-    "askai.section.default" : {
-      "comment" : "Section header for the Ask AI default model and prompt",
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Default"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "По умолчанию"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "默认"
-          }
-        }
-      }
-    },
-    "askai.section.default.sub" : {
-      "comment" : "Subtitle for the Ask AI default section",
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Used when a question does not start with a preset command."
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Используется, когда вопрос не начинается с команды пресета."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "用于不以预设命令开头的问题。"
           }
         }
       }
@@ -34099,6 +34987,12 @@
       "comment" : "Sidebar row label / navigation title for the Ask AI section",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "KI fragen"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -34309,6 +35203,12 @@
       "comment" : "Sidebar group heading for settings stored by the Mac app itself",
       "extractionState" : "manual",
       "localizations" : {
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "App"
+          }
+        },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
@@ -34761,6 +35661,1086 @@
         }
       }
     },
+    "askai.clipboard.guide.done" : {
+      "comment" : "Button that closes the clipboard permission guide",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Done"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Готово"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "完成"
+          }
+        }
+      }
+    },
+    "askai.clipboard.guide.open_settings" : {
+      "comment" : "Button that opens the macOS Privacy & Security settings",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Open System Settings"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Открыть Системные настройки"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "打开系统设置"
+          }
+        }
+      }
+    },
+    "askai.clipboard.guide.step1" : {
+      "comment" : "First step of the clipboard permission guide",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Click Test, then choose Allow when macOS asks to paste from another app."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Нажмите «Проверить», затем выберите «Разрешить», когда macOS спросит о вставке из другого приложения."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "点按“测试”，然后在 macOS 询问是否从其他应用粘贴时选择“允许”。"
+          }
+        }
+      }
+    },
+    "askai.clipboard.guide.step2" : {
+      "comment" : "Second step of the clipboard permission guide",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "To stop the question on every conversation, open System Settings > Privacy & Security and choose Always Allow for oMLX."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Чтобы вопрос не появлялся в каждом разговоре, откройте Системные настройки > Конфиденциальность и безопасность и выберите «Всегда разрешать» для oMLX."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "若不想每次对话都被询问，请打开“系统设置 > 隐私与安全性”，为 oMLX 选择“始终允许”。"
+          }
+        }
+      }
+    },
+    "askai.clipboard.guide.test" : {
+      "comment" : "Button that reads the clipboard once so macOS asks for permission",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Test"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Проверить"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "测试"
+          }
+        }
+      }
+    },
+    "askai.clipboard.guide.title" : {
+      "comment" : "Title of the clipboard permission guide",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Allow Clipboard Access"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Разрешите доступ к буферу обмена"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "允许访问剪贴板"
+          }
+        }
+      }
+    },
+    "askai.clipboard.how" : {
+      "comment" : "Button that opens the clipboard permission guide",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "How to Allow…"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Как разрешить…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "如何允许…"
+          }
+        }
+      }
+    },
+    "askai.clipboard.warning" : {
+      "comment" : "Warning shown while the clipboard placeholder needs a paste permission",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "macOS asks before oMLX reads the clipboard for {clipboard}."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "macOS спрашивает разрешение, прежде чем oMLX прочитает буфер обмена для {clipboard}."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "oMLX 为 {clipboard} 读取剪贴板前，macOS 会先询问。"
+          }
+        }
+      }
+    },
+    "askai.page.back" : {
+      "comment" : "Back button label on an Ask AI settings sub-page",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Back to Ask AI"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Назад к Ask AI"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "返回 Ask AI"
+          }
+        }
+      }
+    },
+    "askai.placeholders.app" : {
+      "comment" : "Description of the {app} prompt placeholder",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The app in front when Ask AI opens"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Приложение на переднем плане при открытии Ask AI"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "打开 Ask AI 时位于前台的应用"
+          }
+        }
+      }
+    },
+    "askai.placeholders.clipboard" : {
+      "comment" : "Description of the {clipboard} prompt placeholder",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Text on the clipboard, up to 4,000 characters"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Текст из буфера обмена, до 4000 символов"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "剪贴板中的文字，最多 4000 个字符"
+          }
+        }
+      }
+    },
+    "askai.placeholders.help" : {
+      "comment" : "Help text above the list of Ask AI prompt placeholders",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Placeholders are filled in when a conversation starts. Click one to add it."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Заполнители подставляются в начале разговора. Нажмите, чтобы добавить."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "占位符会在对话开始时填入。点按即可添加。"
+          }
+        }
+      }
+    },
+    "askai.placeholders.model" : {
+      "comment" : "Description of the {model} prompt placeholder",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The model that answers"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Модель, которая отвечает"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "回答所用的模型"
+          }
+        }
+      }
+    },
+    "askai.prompt.preset.sub" : {
+      "comment" : "Explains that a preset prompt replaces the default system prompt",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Used instead of the default system prompt while this preset runs, so add the date or other placeholders here if the preset needs them."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Используется вместо системного промпта по умолчанию, пока работает этот пресет, поэтому добавьте сюда дату или другие подстановки, если они нужны."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "运行此预设时会替代默认系统提示词，如需日期或其他占位符，请在这里添加。"
+          }
+        }
+      }
+    },
+    "askai.prompt.reset" : {
+      "comment" : "Button that puts the default Ask AI system prompt back",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Reset to Default"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Сбросить к стандартному"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "恢复默认"
+          }
+        }
+      }
+    },
+    "askai.restart_app" : {
+      "comment" : "Button that quits and reopens oMLX so a new permission applies",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Restart oMLX"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Перезапустить oMLX"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "重新启动 oMLX"
+          }
+        }
+      }
+    },
+    "askai.row.model.sub" : {
+      "comment" : "Sublabel for the Ask AI default model picker",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Used when a question does not start with a preset command."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Используется, когда вопрос не начинается с команды пресета."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "用于不以预设命令开头的问题。"
+          }
+        }
+      }
+    },
+    "askai.screen.guide.later" : {
+      "comment" : "Button that closes the screen recording permission guide",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Not Now"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Не сейчас"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "以后再说"
+          }
+        }
+      }
+    },
+    "askai.screen.guide.open_settings" : {
+      "comment" : "Button that opens the macOS screen recording privacy settings",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Open System Settings"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Открыть Системные настройки"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "打开系统设置"
+          }
+        }
+      }
+    },
+    "askai.screen.guide.step1" : {
+      "comment" : "First step of the screen recording permission guide",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Click Open System Settings, then turn on oMLX in Screen & System Audio Recording."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Нажмите «Открыть Системные настройки» и включите oMLX в разделе «Запись экрана и системного звука»."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "点击“打开系统设置”，然后在“录屏与系统录音”中打开 oMLX。"
+          }
+        }
+      }
+    },
+    "askai.screen.guide.step2" : {
+      "comment" : "Second step of the screen recording permission guide",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The permission applies after oMLX restarts. Choose Quit & Reopen when macOS asks, or click Restart oMLX next to the warning."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Разрешение вступит в силу после перезапуска oMLX. Выберите «Завершить и открыть снова», когда macOS спросит, или нажмите «Перезапустить oMLX» рядом с предупреждением."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "权限在 oMLX 重新启动后生效。macOS 询问时选择“退出并重新打开”，或点击警告旁的“重新启动 oMLX”。"
+          }
+        }
+      }
+    },
+    "askai.screen.guide.title" : {
+      "comment" : "Title of the screen recording permission guide",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Allow Screen Recording"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Разрешите запись экрана"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "允许屏幕录制"
+          }
+        }
+      }
+    },
+    "askai.section.advanced" : {
+      "comment" : "Row and page title for the less used Ask AI text or voice settings",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Advanced Settings"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Дополнительные настройки"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "高级设置"
+          }
+        }
+      }
+    },
+    "askai.section.text" : {
+      "comment" : "Section header for the Ask AI text bar settings",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ask via Text"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Спросить текстом"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "文字提问"
+          }
+        }
+      }
+    },
+    "askai.tool.read.done" : {
+      "comment" : "Ask AI tool line after a web page was fetched; the argument is the site",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Read %@"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Прочитано: %@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已读取 %@"
+          }
+        }
+      }
+    },
+    "askai.tool.read.failed" : {
+      "comment" : "Ask AI tool line after a page fetch failed; the argument is the site",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Couldn't read %@"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Не удалось прочитать %@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法读取 %@"
+          }
+        }
+      }
+    },
+    "askai.tool.read.running" : {
+      "comment" : "Ask AI tool line while a web page is fetched; the argument is the site",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Reading %@"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Чтение %@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在读取 %@"
+          }
+        }
+      }
+    },
+    "askai.tool.screen.done" : {
+      "comment" : "Ask AI tool line after a screenshot was sent to the model",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Looked at your screen"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Экран просмотрен"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已查看你的屏幕"
+          }
+        }
+      }
+    },
+    "askai.tool.screen.failed" : {
+      "comment" : "Ask AI tool line after a screenshot failed",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Couldn't capture the screen"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Не удалось сделать снимок экрана"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法截取屏幕"
+          }
+        }
+      }
+    },
+    "askai.tool.screen.running" : {
+      "comment" : "Ask AI tool line while a screenshot is taken",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Looking at your screen"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Смотрю на ваш экран"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在查看你的屏幕"
+          }
+        }
+      }
+    },
+    "askai.tool.search.done" : {
+      "comment" : "Ask AI tool line after a web search; the argument is the query",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Searched the web: %@"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Поиск в интернете выполнен: %@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已搜索网络：%@"
+          }
+        }
+      }
+    },
+    "askai.tool.search.failed" : {
+      "comment" : "Ask AI tool line after a failed web search; the argument is the query",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Web search failed: %@"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Не удалось выполнить поиск: %@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "网络搜索失败：%@"
+          }
+        }
+      }
+    },
+    "askai.tool.search.running" : {
+      "comment" : "Ask AI tool line while a web search runs; the argument is the query",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Searching the web: %@"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Поиск в интернете: %@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在搜索网络：%@"
+          }
+        }
+      }
+    },
+    "askai.tools.read_links" : {
+      "comment" : "Checkbox for the Ask AI tool that reads web pages",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Read Links"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Чтение ссылок"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "读取链接"
+          }
+        }
+      }
+    },
+    "askai.tools.read_links.sub" : {
+      "comment" : "Description of the Ask AI read links tool",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Reads web pages, including links you put in a question."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Читает веб-страницы, в том числе по ссылкам из вашего вопроса."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "读取网页，包括你在问题中附上的链接。"
+          }
+        }
+      }
+    },
+    "askai.tools.row" : {
+      "comment" : "Row label for the Ask AI tool calling switch",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tool Calling"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Вызов инструментов"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "工具调用"
+          }
+        }
+      }
+    },
+    "askai.tools.row.sub" : {
+      "comment" : "Sublabel for the Ask AI tool calling switch",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Lets the model search the web, read links and look at your screen when it needs to."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Модель сможет при необходимости искать в интернете, читать ссылки и смотреть на ваш экран."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "让模型在需要时搜索网络、读取链接并查看你的屏幕。"
+          }
+        }
+      }
+    },
+    "askai.tools.screen" : {
+      "comment" : "Checkbox for the Ask AI screen capture tool",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Screen Capture"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Снимок экрана"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "屏幕截图"
+          }
+        }
+      }
+    },
+    "askai.tools.screen.allow" : {
+      "comment" : "Button that opens the screen recording permission guide",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Allow…"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Разрешить…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "允许…"
+          }
+        }
+      }
+    },
+    "askai.tools.screen.needs_vision" : {
+      "comment" : "Shown under the screen capture tool when the model cannot read images",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Needs a vision (VLM) model."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Нужна модель с поддержкой изображений (VLM)."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "需要视觉（VLM）模型。"
+          }
+        }
+      }
+    },
+    "askai.tools.screen.sub" : {
+      "comment" : "Description of the Ask AI screen capture tool",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Takes a screenshot when you ask about something on your screen. oMLX windows are left out."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Делает снимок экрана, когда вы спрашиваете о том, что на нём. Окна oMLX в снимок не попадают."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "当你询问屏幕上的内容时截取屏幕，不包含 oMLX 窗口。"
+          }
+        }
+      }
+    },
+    "askai.tools.screen.warning" : {
+      "comment" : "Warning shown while oMLX has no screen recording permission",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Screen recording permission is off, so Ask AI can't see your screen."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Запись экрана не разрешена, поэтому Ask AI не видит ваш экран."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "屏幕录制权限未开启，Ask AI 无法查看你的屏幕。"
+          }
+        }
+      }
+    },
+    "askai.tools.web_search" : {
+      "comment" : "Checkbox for the Ask AI web search tool",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Web Search"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Поиск в интернете"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "网络搜索"
+          }
+        }
+      }
+    },
+    "askai.tools.web_search.sub" : {
+      "comment" : "Description of the Ask AI web search tool",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Uses the search provider set in Dashboard Settings > Integrations."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Использует поисковую службу из «Настройки панели > Интеграции»."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "使用控制面板设置 > 集成中设定的搜索服务。"
+          }
+        }
+      }
+    },
+    "askai.voice.help" : {
+      "comment" : "Tooltip on the Ask AI bar button that switches to the voice card",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Talk Instead"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Сказать голосом"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "改用语音"
+          }
+        }
+      }
+    },
     "update.confirm.downloaded" : {
       "comment" : "Update confirmation footer line when the update is already downloaded",
       "extractionState" : "manual",
@@ -34781,6 +36761,1278 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "已下载，可以安装"
+          }
+        }
+      }
+    },
+    "talkai.button.copy" : {
+      "comment" : "Help text for the button that copies the AI replies of the conversation",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Copy Replies"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Копировать ответы"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "复制回复"
+          }
+        }
+      }
+    },
+    "talkai.button.end" : {
+      "comment" : "Help text for the button that ends the Ask AI voice conversation",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "End"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Завершить"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "结束"
+          }
+        }
+      }
+    },
+    "talkai.button.mute" : {
+      "comment" : "Help text for the Ask AI voice mute button",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mute"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Выключить микрофон"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "静音"
+          }
+        }
+      }
+    },
+    "talkai.button.open_settings" : {
+      "comment" : "Button in the Ask AI voice panel that opens the relevant settings",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Open Settings"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Открыть настройки"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "打开设置"
+          }
+        }
+      }
+    },
+    "talkai.button.share_screen" : {
+      "comment" : "Help text for the voice card button that sends a screenshot with each turn",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Share Screen"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Показать экран"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "共享屏幕"
+          }
+        }
+      }
+    },
+    "talkai.button.stop_sharing" : {
+      "comment" : "Help text for the voice card button while the screen is being shared",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Stop Sharing Screen"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Прекратить показ экрана"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "停止共享屏幕"
+          }
+        }
+      }
+    },
+    "talkai.button.type_instead" : {
+      "comment" : "Help text for the button that switches from the voice card to the Ask AI text bar",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Type Instead"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ввести текстом"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "改用文字"
+          }
+        }
+      }
+    },
+    "talkai.button.unmute" : {
+      "comment" : "Help text for the Ask AI voice unmute button",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Unmute"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Включить микрофон"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "取消静音"
+          }
+        }
+      }
+    },
+    "talkai.error.audio" : {
+      "comment" : "Shown in the Ask AI voice panel when the audio engine fails to start",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Couldn't start the microphone or speakers."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Не удалось запустить микрофон или динамики."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法启动麦克风或扬声器。"
+          }
+        }
+      }
+    },
+    "talkai.error.disconnected" : {
+      "comment" : "Shown in the Ask AI voice panel when the realtime connection closes",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Lost the connection to the server. Make sure it is running."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Соединение с сервером потеряно. Убедитесь, что он запущен."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "与服务器的连接已断开。请确认服务器正在运行。"
+          }
+        }
+      }
+    },
+    "talkai.error.microphone" : {
+      "comment" : "Shown in the Ask AI voice panel when microphone access is denied",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "oMLX can't use the microphone. Turn it on in System Settings."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "oMLX не может использовать микрофон. Включите доступ в Системных настройках."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "oMLX 无法使用麦克风。请在“系统设置”中开启。"
+          }
+        }
+      }
+    },
+    "talkai.error.no_microphone" : {
+      "comment" : "Shown in the Ask AI voice panel when the Mac has no audio input device",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No microphone found. Connect a microphone or headset and try again."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Микрофон не найден. Подключите микрофон или гарнитуру и попробуйте снова."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未找到麦克风。请连接麦克风或耳机后重试。"
+          }
+        }
+      }
+    },
+    "talkai.error.no_model" : {
+      "comment" : "Shown in the Ask AI voice panel when no model is selected",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Choose a voice model in Ask AI settings."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Выберите голосовую модель в настройках Ask AI."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "请在 Ask AI 设置中选择语音模型。"
+          }
+        }
+      }
+    },
+    "talkai.guide.continue" : {
+      "comment" : "Button that asks macOS for microphone access",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Continue"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Продолжить"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "继续"
+          }
+        }
+      }
+    },
+    "talkai.guide.later" : {
+      "comment" : "Button that closes the microphone permission guide",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Not Now"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Не сейчас"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "以后再说"
+          }
+        }
+      }
+    },
+    "talkai.guide.open_settings" : {
+      "comment" : "Button that opens the macOS microphone privacy settings",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Open System Settings"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Открыть Системные настройки"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "打开系统设置"
+          }
+        }
+      }
+    },
+    "talkai.guide.step1" : {
+      "comment" : "First step of the microphone permission guide",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Click Continue, then choose Allow when macOS asks to use the microphone."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Нажмите «Продолжить», затем выберите «Разрешить», когда macOS запросит доступ к микрофону."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "点击“继续”，然后在 macOS 请求使用麦克风时选择“允许”。"
+          }
+        }
+      }
+    },
+    "talkai.guide.step2" : {
+      "comment" : "Second step of the microphone permission guide",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "If you denied it before, open System Settings > Privacy & Security > Microphone and turn on oMLX."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Если вы уже запретили доступ, откройте Системные настройки > Конфиденциальность и безопасность > Микрофон и включите oMLX."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "如果之前拒绝过，请打开“系统设置 > 隐私与安全性 > 麦克风”并开启 oMLX。"
+          }
+        }
+      }
+    },
+    "talkai.guide.step3" : {
+      "comment" : "Third step of the microphone permission guide",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Choose a voice model below, then press the hotkey and start talking."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Выберите голосовую модель ниже, затем нажмите сочетание клавиш и начните говорить."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在下方选择语音模型，然后按下快捷键开始说话。"
+          }
+        }
+      }
+    },
+    "talkai.guide.title" : {
+      "comment" : "Title of the Ask AI voice microphone permission guide",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Allow Microphone Access"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Разрешите доступ к микрофону"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "允许访问麦克风"
+          }
+        }
+      }
+    },
+    "talkai.hotkey.error.in_use" : {
+      "comment" : "Shown when the Ask AI voice hotkey cannot be registered; the argument is the shortcut",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ is already used by macOS, Ask AI, or another app. Choose a different shortcut."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ уже используется macOS, Ask AI или другим приложением. Выберите другое сочетание клавиш."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ 已被 macOS、Ask AI 或其他应用占用。请选择其他快捷键。"
+          }
+        }
+      }
+    },
+    "talkai.microphone.allow" : {
+      "comment" : "Button that opens the microphone permission guide",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Allow…"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Разрешить…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "允许…"
+          }
+        }
+      }
+    },
+    "talkai.microphone.warning" : {
+      "comment" : "Warning shown while oMLX has no microphone access",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Microphone access is off, so Ask AI can't hear you."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Доступ к микрофону выключен, поэтому Ask AI вас не слышит."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "麦克风访问已关闭，Ask AI 无法听到你的声音。"
+          }
+        }
+      }
+    },
+    "talkai.models.missing" : {
+      "comment" : "Warning shown when no installed model can hold a voice conversation",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No voice model is installed. Ask via Voice needs a speech-to-speech model such as LFM3-Audio, LFM3-Omni or Qwen3-Omni."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Голосовая модель не установлена. Для голосовых вопросов нужна модель речь-в-речь, например LFM3-Audio, LFM3-Omni или Qwen3-Omni."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未安装语音模型。语音提问需要语音到语音模型，例如 LFM3-Audio、LFM3-Omni 或 Qwen3-Omni。"
+          }
+        }
+      }
+    },
+    "talkai.models.open" : {
+      "comment" : "Button that opens the Downloads screen to get a voice model",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Open Downloads"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Открыть загрузки"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "打开下载"
+          }
+        }
+      }
+    },
+    "talkai.orb.space" : {
+      "comment" : "Key cap label in the Ask AI voice orb while the user speaks",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Space"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Пробел"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "空格"
+          }
+        }
+      }
+    },
+    "talkai.orb.to_send" : {
+      "comment" : "Shown under the Space key cap: pressing Space sends the user's turn",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "to send"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "отправить"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "发送"
+          }
+        }
+      }
+    },
+    "talkai.prompt.general" : {
+      "comment" : "Label above the prompt used with every voice model",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "General Prompt"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Общий промпт"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "通用提示词"
+          }
+        }
+      }
+    },
+    "talkai.prompt.general.sub" : {
+      "comment" : "Explains the voice general prompt",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Used with every voice model, after the model prompt."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Используется со всеми голосовыми моделями, после промпта модели."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "用于所有语音模型，位于模型提示词之后。"
+          }
+        }
+      }
+    },
+    "talkai.prompt.model" : {
+      "comment" : "Label above the prompt used only with the selected voice model",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Model Prompt"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Промпт модели"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "模型提示词"
+          }
+        }
+      }
+    },
+    "talkai.prompt.model.none" : {
+      "comment" : "Placeholder for the voice model prompt when the model has no default",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Optional. This model has no recommended prompt."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Необязательно. У этой модели нет рекомендованного промпта."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "可选。此模型没有推荐的提示词。"
+          }
+        }
+      }
+    },
+    "talkai.prompt.model.sub" : {
+      "comment" : "Explains the voice model prompt; the argument is the model name",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Used only with %@, before the general prompt. Reset to Default puts back the model's recommended prompt."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Используется только с %@, перед общим промптом. «Сбросить» возвращает рекомендованный промпт модели."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仅用于 %@，位于通用提示词之前。“恢复默认”会还原该模型推荐的提示词。"
+          }
+        }
+      }
+    },
+    "talkai.prompt.placeholder" : {
+      "comment" : "Placeholder for the Ask AI voice system prompt",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Optional. For example: Keep answers short and friendly."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Необязательно. Например: отвечай коротко и дружелюбно."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "可选。例如：回答简短友好。"
+          }
+        }
+      }
+    },
+    "talkai.row.enabled" : {
+      "comment" : "Row label for the switch that enables asking Ask AI by voice",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Enable Voice"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Включить голос"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "启用语音"
+          }
+        }
+      }
+    },
+    "talkai.row.enabled.sub" : {
+      "comment" : "Sublabel for the Ask AI voice switch",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Talk with a voice model from any app with a global shortcut."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Разговаривайте с голосовой моделью из любого приложения по глобальному сочетанию клавиш."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在任意应用中通过全局快捷键与语音模型对话。"
+          }
+        }
+      }
+    },
+    "talkai.row.gpu_power_limit.sub" : {
+      "comment" : "Sublabel for the Ask AI voice GPU power limit",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Caps GPU power for the whole Mac during a voice conversation (2 to 1000 W). Low limits can make replies start late or stutter. If the model also has a limit, the lower one applies."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ограничивает мощность GPU всего Mac во время голосового разговора (от 2 до 1000 Вт). При низком пределе ответы могут начинаться позже или прерываться. Если у модели есть свой предел, действует меньший."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "语音对话期间限制整台 Mac 的 GPU 功率（2 至 1000 W）。限制过低可能使回复开始变慢或断断续续。若模型也设有限制，则以较低者为准。"
+          }
+        }
+      }
+    },
+    "talkai.row.hotkey" : {
+      "comment" : "Row label for the Ask AI voice global shortcut",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hotkey"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Горячая клавиша"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "快捷键"
+          }
+        }
+      }
+    },
+    "talkai.row.hotkey.sub" : {
+      "comment" : "Sublabel for the Ask AI voice global shortcut",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Press it again or Esc to end the conversation. Press Space to finish your turn."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Нажмите её ещё раз или Esc, чтобы завершить разговор. Пробел завершает вашу реплику."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "再次按下或按 Esc 结束对话。按空格键结束你的发言。"
+          }
+        }
+      }
+    },
+    "talkai.row.model.sub" : {
+      "comment" : "Sublabel for the Ask AI voice model picker",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Speech-to-speech models only (LFM3, Qwen3-Omni)."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Только модели речь-в-речь (LFM3, Qwen3-Omni)."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仅支持语音到语音模型（LFM3、Qwen3-Omni）。"
+          }
+        }
+      }
+    },
+    "talkai.row.speed" : {
+      "comment" : "Row label for the Ask AI voice reply playback speed",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Speech Speed"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Скорость речи"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "语速"
+          }
+        }
+      }
+    },
+    "talkai.row.speed.sub" : {
+      "comment" : "Sublabel for the Ask AI voice reply playback speed",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Plays replies faster or slower without changing the pitch."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ответы звучат быстрее или медленнее без изменения высоты голоса."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "加快或放慢回复的播放速度，音调保持不变。"
+          }
+        }
+      }
+    },
+    "talkai.row.voice" : {
+      "comment" : "Row label for the Ask AI voice voice picker",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Voice"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Голос"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "声音"
+          }
+        }
+      }
+    },
+    "talkai.section" : {
+      "comment" : "Section header for the Ask AI voice conversation settings",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ask via Voice"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Спросить голосом"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "语音提问"
+          }
+        }
+      }
+    },
+    "talkai.section.sub" : {
+      "comment" : "Subtitle for the Ask AI voice settings",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Start speaking at any time to interrupt the reply."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Начните говорить в любой момент, чтобы перебить ответ."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "随时开口即可打断回复。"
+          }
+        }
+      }
+    },
+    "talkai.share.permission" : {
+      "comment" : "Shown in the voice card when screen sharing needs the screen recording permission",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Allow oMLX in System Settings > Screen & System Audio Recording, then restart oMLX."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Разрешите oMLX в «Системные настройки > Запись экрана и системного звука», затем перезапустите oMLX."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "请在“系统设置 > 录屏与系统录音”中允许 oMLX，然后重新启动 oMLX。"
+          }
+        }
+      }
+    },
+    "talkai.status.connecting" : {
+      "comment" : "Ask AI voice status while the voice session starts",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Connecting…"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Подключение…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在连接…"
+          }
+        }
+      }
+    },
+    "talkai.status.failed" : {
+      "comment" : "Ask AI voice status when the session cannot continue",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Can't Talk Right Now"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Сейчас поговорить не получится"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "暂时无法对话"
+          }
+        }
+      }
+    },
+    "talkai.status.listening" : {
+      "comment" : "Ask AI voice status while waiting for or hearing the user",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Listening"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Слушаю"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在聆听"
+          }
+        }
+      }
+    },
+    "talkai.status.muted" : {
+      "comment" : "Ask AI voice status while the microphone is muted",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Muted"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Микрофон выключен"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已静音"
+          }
+        }
+      }
+    },
+    "talkai.status.speaking" : {
+      "comment" : "Ask AI voice status while the reply plays",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Speaking"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Говорю"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在说话"
+          }
+        }
+      }
+    },
+    "talkai.status.thinking" : {
+      "comment" : "Ask AI voice status after the user's turn, before the reply plays",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Thinking"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Думаю"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在思考"
+          }
+        }
+      }
+    },
+    "talkai.tools.unsupported" : {
+      "comment" : "Hint under the voice settings when the selected model has no tool calling",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This voice model can't call tools."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Эта голосовая модель не умеет вызывать инструменты."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此语音模型无法调用工具。"
+          }
+        }
+      }
+    },
+    "talkai.voice.default" : {
+      "comment" : "Voice picker option that uses the model's default voice",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Default"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "По умолчанию"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "默认"
           }
         }
       }

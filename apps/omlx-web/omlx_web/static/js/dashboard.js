@@ -8491,12 +8491,7 @@
 
             // What "download all" still has to fetch: its files not downloaded yet.
             hfDownloadAllSize() {
-                const detail = this.hfModelDetail;
-                if (!detail?.files?.length) return detail?.download_all_size || 0;
-                const fetched = detail.layout === 'safetensors' ? (f => f.preselected) : (() => true);
-                return detail.files
-                    .filter(f => fetched(f) && !f.local)
-                    .reduce((total, f) => total + (f.size || 0), 0);
+                return this.hfModelDetail?.download_all_size || 0;
             },
 
             hfFitsDisk(bytes) {

@@ -16,6 +16,7 @@ import glob
 import json
 import logging
 import os
+import re
 import signal
 import sys
 import threading
@@ -786,6 +787,32 @@ def _local_state(local_dir: Path, name: str, size: int, etag: str | None) -> str
     return "current" if size <= 0 or local_size == size else "outdated"
 
 
+def _checkpoint_folder(name: str) -> str:
+    """Top-level folder holding the checkpoint `name` belongs to ('' = repo root)."""
+    return name.split("/", 1)[0] if "/" in name else ""
+
+
+# `2-bit`, `4bit`, `6.0-bit`: the same checkpoint published at another precision.
+_PRECISION_FOLDER_RE = re.compile(r"^\d+(?:\.\d+)?(?:-|_)?bit$", re.IGNORECASE)
+
+
+def _default_safetensors_checkpoint(names: list[str]) -> str | None:
+    """Checkpoint a safetensors repo loads by default; None when ambiguous.
+
+    Multi-precision repos keep `2-bit/`, `4-bit/`, ... next to the root copy
+    the repo serves by default; a lone weight folder is equally unambiguous.
+    Anything else stays whole-repo (#4932).
+    """
+    folders = {
+        _checkpoint_folder(name) for name in names if name.endswith(".safetensors")
+    }
+    if "" in folders:
+        return ""
+    if len(folders) == 1:
+        return folders.pop()
+    return None
+
+
 def _update_files(files: list[dict], local_dir: Path | None) -> list[str]:
     """Files that bring a downloaded copy up to date with the repo.
 
@@ -871,9 +898,28 @@ def _describe_repo_files(
     layout = _repo_layout(names)
     split_groups = gguf.split_file_groups(names)
     projectors = _default_mmproj(names)
-    # A selection starts from what downloading the whole repo would fetch.
+    checkpoint = (
+        _default_safetensors_checkpoint(names) if layout == "safetensors" else None
+    )
+
+    def other_precision(name: str) -> bool:
+        folder = _checkpoint_folder(name)
+        return (
+            checkpoint is not None
+            and folder != checkpoint
+            and _PRECISION_FOLDER_RE.match(folder) is not None
+        )
+
+    # A selection starts from what a whole-repo download fetches, minus
+    # other precisions of the default checkpoint.
     preselected = (
-        set(filter_repo_objects(names, ignore_patterns=_SAFETENSORS_REPO_IGNORE))
+        {
+            name
+            for name in filter_repo_objects(
+                names, ignore_patterns=_SAFETENSORS_REPO_IGNORE
+            )
+            if not other_precision(name)
+        }
         if layout == "safetensors"
         else set()
     )
@@ -893,7 +939,9 @@ def _describe_repo_files(
         else:
             row["kind"] = "other"
         optional = _optional_for_safetensors(name)
-        row["required"] = layout == "safetensors" and not optional
+        row["required"] = (
+            layout == "safetensors" and not optional and not other_precision(name)
+        )
         row["preselected"] = name in preselected
         state = (
             _local_state(local_dir, name, row["size"], etags.get(name))
@@ -1582,9 +1630,15 @@ class HFDownloader(_QueuePersistenceMixin):
             params_formatted = _format_param_count(params) if params > 0 else None
             if size == 0 and "U32" not in st_params:
                 size = _calc_safetensors_disk_size({"parameters": st_params})
-        # What "download all" fetches, by the rules of a whole-repo download.
-        download_all_size = _sum_snapshot_bytes(
-            info.siblings, _SAFETENSORS_REPO_IGNORE if st_params else None
+        # What "download all" still fetches: a whole-repo download minus local files.
+        download_all_size = sum(
+            row["size"]
+            for row in filter_repo_objects(
+                files,
+                ignore_patterns=_SAFETENSORS_REPO_IGNORE if st_params else None,
+                key=lambda row: row["name"],
+            )
+            if not row["local"]
         )
 
         # Fetch model card (README.md) content
