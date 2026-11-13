@@ -450,19 +450,24 @@ METAL_FUNC void affine_attention_impl(
         if (tile_valid_start >= tile_valid_end)
             continue;
 
-        if (sg == 0) {
+        // Simdgroups score BK / QKWarps columns each; QKWarps is the largest of
+        // Warps, 2, 1 that divides the tile (3 warps for dim 96 -> 2 score).
+        constexpr int QKWarps = BK % Warps == 0 ? Warps : (Warps >= 2 ? 2 : 1);
+        if (int(sg) < QKWarps) {
+            constexpr int QKCols = BK / QKWarps;
             constexpr auto qk_desc = matmul2d_descriptor(
-                PaddedRows, BK, Dim, false, true, false);
+                PaddedRows, QKCols, Dim, false, true, false);
             matmul2d<qk_desc, execution_simdgroup> qk_op;
             auto q_slice = q_tensor.template slice<Dim, PaddedRows>(0, 0);
-            auto k_slice = k_tensor.template slice<Dim, BK>(0, token);
+            auto k_slice = k_tensor.template slice<Dim, QKCols>(
+                0, token + int(sg) * QKCols);
             auto score_tile = qk_op.template get_destination_cooperative_tensor<
                 decltype(q_slice), decltype(k_slice), float>();
             qk_op.run(q_slice, k_slice, score_tile);
             for (short i = 0; i < score_tile.get_capacity(); ++i) {
                 auto coord = score_tile.get_multidimensional_index(i);
                 if (score_tile.is_valid_element(i)) {
-                    int column = coord[0];
+                    int column = int(sg) * QKCols + coord[0];
                     int row = coord[1];
                     int absolute_token = token + column;
                     int position = row % QueryLength;
@@ -483,38 +488,56 @@ METAL_FUNC void affine_attention_impl(
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        if (int(tid) < ActiveRows) {
-            int row = int(tid);
-            float tile_m = -INFINITY;
-            for (int column = 0; column < BK; ++column)
-                tile_m = max(tile_m, scores[row * BK + column]);
-            float old_m = row_m[row];
-            if (isinf(tile_m)) {
-                row_factor[row] = 1.0f;
-                for (int column = 0; column < BK; ++column)
-                    probabilities[row * BK + column] = half(0.0f);
-            } else {
-                float new_m = max(old_m, tile_m);
-                float factor = isinf(old_m) ? 0.0f : fast::exp(old_m - new_m);
-                float l = row_l[row] * factor;
-                for (int column = 0; column < BK; ++column) {
-                    int absolute_token = token + column;
-                    bool active = !isinf(scores[row * BK + column]);
-                    float weight = active
-                        ? fast::exp(scores[row * BK + column] - new_m)
-                        : 0.0f;
-                    l += weight;
-                    probabilities[row * BK + column] = half(
-                        weight * (active ? float(value_scales[absolute_token * value_scale_stride]) / block_scale : 0.0f));
+        {
+            // Online softmax with SoftmaxLanes threads per row (half a simdgroup); the
+            // row max and sum are reduced with shuffles inside that half.
+            constexpr int SoftmaxLanes = 16;
+            constexpr int ColsPerLane = BK / SoftmaxLanes;
+            constexpr int RowsPerPass = (32 * Warps) / SoftmaxLanes;
+            static_assert(BK % SoftmaxLanes == 0, "tile width must split across lanes");
+            int lane = int(tid) % SoftmaxLanes;
+            int first_column = lane * ColsPerLane;
+            for (int row = int(tid) / SoftmaxLanes; row < PaddedRows; row += RowsPerPass) {
+                if (row >= ActiveRows) {
+                    for (int c = 0; c < ColsPerLane; ++c)
+                        probabilities[row * BK + first_column + c] = half(0.0f);
+                    continue;
                 }
-                row_m[row] = new_m;
-                row_l[row] = l;
-                row_factor[row] = factor;
+                float tile_m = -INFINITY;
+                for (int c = 0; c < ColsPerLane; ++c)
+                    tile_m = max(tile_m, scores[row * BK + first_column + c]);
+                for (ushort offset = SoftmaxLanes / 2; offset > 0; offset >>= 1)
+                    tile_m = max(tile_m, simd_shuffle_xor(tile_m, offset));
+                float old_m = row_m[row];
+                if (isinf(tile_m)) {
+                    for (int c = 0; c < ColsPerLane; ++c)
+                        probabilities[row * BK + first_column + c] = half(0.0f);
+                    if (lane == 0)
+                        row_factor[row] = 1.0f;
+                } else {
+                    float new_m = max(old_m, tile_m);
+                    float factor = isinf(old_m) ? 0.0f : fast::exp(old_m - new_m);
+                    float part = 0.0f;
+                    for (int c = 0; c < ColsPerLane; ++c) {
+                        int column = first_column + c;
+                        int absolute_token = token + column;
+                        float score = scores[row * BK + column];
+                        bool active = !isinf(score);
+                        float weight = active ? fast::exp(score - new_m) : 0.0f;
+                        part += weight;
+                        probabilities[row * BK + column] = half(
+                            weight * (active ? float(value_scales[absolute_token * value_scale_stride]) / block_scale : 0.0f));
+                    }
+                    for (ushort offset = SoftmaxLanes / 2; offset > 0; offset >>= 1)
+                        part += simd_shuffle_xor(part, offset);
+                    if (lane == 0) {
+                        row_m[row] = new_m;
+                        row_l[row] = row_l[row] * factor + part;
+                        row_factor[row] = factor;
+                    }
+                }
             }
         }
-        for (int i = int(tid) + ActiveRows * BK;
-             i < PaddedRows * BK; i += 32 * Warps)
-            probabilities[i] = half(0.0f);
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
         for (short i = 0; i < output_tile.get_capacity(); ++i) {
@@ -559,12 +582,16 @@ _MPP_ATTENTION_SOURCE = r"""
     threadgroup float query_scales[PaddedRows];
 
     int batch = int(group.y);
-    int kv_head = int(group.x);
+    // A KV head's query heads that do not fit one threadgroup split into
+    // Chunks threadgroups next to each other in x, so they stream the same
+    // K/V tiles together.
+    int kv_head = int(group.x) / Chunks;
+    int chunk = int(group.x) % Chunks;
     if (int(tid) < PaddedRows) {
         int row = int(tid);
         float maximum = 0.0f;
         if (row < ActiveRows) {
-            int head = kv_head * Repeats + row / QueryLength;
+            int head = kv_head * RepeatsTotal + chunk * Repeats + row / QueryLength;
             int position = row % QueryLength;
             for (int d = 0; d < Dim; ++d)
                 maximum = max(maximum, abs(float(queries[
@@ -577,7 +604,7 @@ _MPP_ATTENTION_SOURCE = r"""
     for (int i = int(tid); i < PaddedRows * Dim; i += 32 * Warps) {
         int row = i / Dim;
         if (row < ActiveRows) {
-            int head = kv_head * Repeats + row / QueryLength;
+            int head = kv_head * RepeatsTotal + chunk * Repeats + row / QueryLength;
             int position = row % QueryLength;
             q_tile[i] = half(queries[
                 batch * queries_strides[0] + head * queries_strides[1] +
@@ -617,7 +644,8 @@ _MPP_ATTENTION_SOURCE = r"""
         int(values_strides[2]),
         int(key_scales_strides[2]),
         int(value_scales_strides[2]),
-        mask + batch * mask_strides[0] + kv_head * Repeats * mask_strides[1],
+        mask + batch * mask_strides[0] +
+            (kv_head * RepeatsTotal + chunk * Repeats) * mask_strides[1],
         int(mask_strides[1]),
         int(mask_strides[2]),
         int(mask_strides[3]),
@@ -683,11 +711,12 @@ def _mpp_attention_kernel(
     warps: int,
     kv_heads: int,
     bits: int = _BITS,
+    chunks: int = 1,
 ):
     return mx.fast.metal_kernel(
         name=(
             f"affine{bits}_mpp_d{dim}_r{repeats}_l{query_length}_"
-            f"m{padded_rows}_w{warps}_h{kv_heads}"
+            f"m{padded_rows}_w{warps}_h{kv_heads}_c{chunks}"
         ),
         input_names=[
             "queries",
@@ -883,75 +912,63 @@ def _native_attention(
         return None
 
     try:
-        pass1 = _mpp_attention_kernel(*geometry, cache.key_codec.bits)
-        # Query heads that do not fit one threadgroup run as several launches.
-        chunks = []
-        for start in range(0, repeats, group):
-            stop = start + group
-            if has_mask and group < repeats:
-                chunk_mask = mx.broadcast_to(
-                    mask, (batch, query_heads, query_length, tokens)
-                ).reshape(batch, kv_heads, repeats, query_length, tokens)
-                chunk_mask = chunk_mask[:, :, start:stop].reshape(
-                    batch, kv_heads * group, query_length, tokens
-                )
-            else:
-                chunk_mask = mx.broadcast_to(
-                    mask, (batch, kv_heads * group, query_length, tokens)
-                )
-            partials, sums, maxs = pass1(
-                inputs=[
-                    rotated[:, :, start:stop].reshape(
-                        batch, kv_heads * group, query_length, dim
-                    ),
-                    keys_state.indices,
-                    keys_state.norms,
-                    values_state.indices,
-                    values_state.norms,
-                    valid_starts,
-                    valid_ends,
-                    chunk_mask,
-                    params,
-                ],
-                template=[
-                    ("Dim", dim),
-                    ("Repeats", group),
-                    ("QueryLength", query_length),
-                    ("PaddedRows", padded_rows),
-                    ("Warps", warps),
-                    ("NumKvHeads", kv_heads),
-                    ("Bits", cache.key_codec.bits),
-                    ("ValuesPerWord", cache.key_codec.values_per_word),
-                    ("Accumulator", accumulator),
-                    ("HasMask", has_mask),
-                ],
-                output_shapes=[
-                    (rows, blocks, dim),
-                    (rows, blocks),
-                    (rows, blocks),
-                ],
-                output_dtypes=[mx.float32, mx.float32, mx.float32],
-                grid=(kv_heads * 32, batch * warps, blocks),
-                threadgroup=(32, warps, 1),
-            )
-            chunk_sinks = (
-                mx.contiguous(row_sinks[:, :, start:stop]).reshape(-1)
-                if has_sinks
-                else row_sinks
-            )
-            chunks.append(
-                _mpp_reduce_kernel(dim)(
-                    inputs=[partials, sums, maxs, chunk_sinks, params],
-                    template=[("Dim", dim), ("HasSinks", has_sinks)],
-                    output_shapes=[(batch, kv_heads, group, query_length, dim)],
-                    output_dtypes=[mx.float32],
-                    grid=(rows * dim, 1, 1),
-                    threadgroup=(dim, 1, 1),
-                )[0]
-            )
-        rotated_output = (
-            mx.concatenate(chunks, axis=2) if len(chunks) > 1 else chunks[0]
+        # Query heads that do not fit one threadgroup (a multi-row verify)
+        # run as several threadgroups per KV head in one launch rather than
+        # one launch per chunk: each launch streams the whole cache, while
+        # neighbouring threadgroups share its tiles. Rows come out in
+        # (batch, kv_head, repeat, position) order either way.
+        chunks = repeats // group
+        pass1 = _mpp_attention_kernel(*geometry, cache.key_codec.bits, chunks)
+        all_rows = rows * chunks
+        partials, sums, maxs = pass1(
+            inputs=[
+                rotated.reshape(batch, query_heads, query_length, dim),
+                keys_state.indices,
+                keys_state.norms,
+                values_state.indices,
+                values_state.norms,
+                valid_starts,
+                valid_ends,
+                mx.broadcast_to(mask, (batch, query_heads, query_length, tokens)),
+                params,
+            ],
+            template=[
+                ("Dim", dim),
+                ("Repeats", group),
+                ("RepeatsTotal", repeats),
+                ("Chunks", chunks),
+                ("QueryLength", query_length),
+                ("PaddedRows", padded_rows),
+                ("Warps", warps),
+                ("NumKvHeads", kv_heads * chunks),
+                ("Bits", cache.key_codec.bits),
+                ("ValuesPerWord", cache.key_codec.values_per_word),
+                ("Accumulator", accumulator),
+                ("HasMask", has_mask),
+            ],
+            output_shapes=[
+                (all_rows, blocks, dim),
+                (all_rows, blocks),
+                (all_rows, blocks),
+            ],
+            output_dtypes=[mx.float32, mx.float32, mx.float32],
+            grid=(kv_heads * chunks * 32, batch * warps, blocks),
+            threadgroup=(32, warps, 1),
         )
+        rotated_output = _mpp_reduce_kernel(dim)(
+            inputs=[
+                partials,
+                sums,
+                maxs,
+                mx.contiguous(row_sinks).reshape(-1) if has_sinks else row_sinks,
+                params,
+            ],
+            template=[("Dim", dim), ("HasSinks", has_sinks)],
+            output_shapes=[(batch, kv_heads, repeats, query_length, dim)],
+            output_dtypes=[mx.float32],
+            grid=(all_rows * dim, 1, 1),
+            threadgroup=(dim, 1, 1),
+        )[0]
         output = cache.value_codec._rotate_inverse(rotated_output)
         output = output.reshape(batch, query_heads, query_length, dim).astype(
             queries.dtype
@@ -1288,7 +1305,7 @@ class Affine4KVCache(TurboQuantKVCache):
         batch, heads, query_length, _ = queries.shape
         tokens = keys.shape[-2]
         step = max(1, _MAX_SCORE_ELEMENTS // max(1, batch * heads * tokens))
-        sinks = None if sinks is None else sinks.astype(mx.float32)
+        sinks = None if sinks is None else sinks.astype(queries.dtype)
         if query_length <= step:
             return mx.fast.scaled_dot_product_attention(
                 queries,
@@ -1361,9 +1378,11 @@ class Affine4KVCache(TurboQuantKVCache):
             and _state_length(keys_state) >= _MIN_NATIVE_TOKENS
             and self.key_codec.dim == self.value_codec.dim
             and self.key_codec.dim in (64, 72, 80, 96, 128, 256)
-            and sinks is None
             and (effective_mask is None or isinstance(effective_mask, str))
         ):
+            # Attention sinks add one logit per head to the softmax denominator. They
+            # do not depend on K/V, so the orthonormal rotation leaves them unchanged.
+            fused_sinks = None if sinks is None else sinks.astype(mx.bfloat16)
             rotated_queries = self.key_codec.prepare_queries(queries).astype(
                 mx.bfloat16
             )
@@ -1382,6 +1401,7 @@ class Affine4KVCache(TurboQuantKVCache):
                     rotated_values,
                     scale=scale,
                     mask=effective_mask,
+                    sinks=fused_sinks,
                     force_fused=True,
                 )
             else:
@@ -1391,7 +1411,7 @@ class Affine4KVCache(TurboQuantKVCache):
                     rotated_values,
                     scale,
                     effective_mask,
-                    None,
+                    fused_sinks,
                 )
             output = self.value_codec._rotate_inverse(
                 rotated_output.astype(mx.float32)
@@ -1484,6 +1504,10 @@ class BatchAffine4KVCache(BatchTurboQuantKVCache, Affine4KVCache):
             raise ValueError(
                 f"Unsupported {self.quantization_scheme} attention mask: {mask}"
             )
+        # Without left padding the plain mask is exact; keeping it a string lets the
+        # bf16 prefill use the fused kernel instead of a (query x cache) mask array.
+        if (mask is None or causal) and not mx.any(self.left_padding).item():
+            return mask
         columns = mx.arange(tokens)
         allowed = columns[None, None, None, :] >= self.left_padding[:, None, None, None]
         if causal:

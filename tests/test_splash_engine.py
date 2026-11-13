@@ -1067,10 +1067,19 @@ class TestRequestTranslation:
         for flag in (
             "--max-context",
             "--max-memory",
-            "--max-cache-disk",
             "--disable-ane",
         ):
             assert flag not in command
+
+    def test_serve_command_turns_ssd_cache_off_without_omlx_ssd_cache(self, tmp_path):
+        # Cache disabled, hot cache only and a Splash SSD size of 0 all reach
+        # Splash as cache_disk_bytes == 0.
+        command = _engine(tmp_path)._serve_command(9000)
+
+        assert command[command.index("--max-cache-disk") + 1] == "0"
+        # Splash rejects --persistent-cache next to --max-cache-disk 0.
+        assert "--persistent-cache" not in command
+        assert "--cache-dir" not in command
 
     def test_request_body_passes_sampling_through(self, tmp_path):
         body = _engine(tmp_path)._request_body(
@@ -1319,7 +1328,8 @@ class TestStreaming:
 # that carry the key from SPLASH_API_KEY.
 FAKE_SERVER = textwrap.dedent("""\
     import json, os, sys
-    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from http.server import BaseHTTPRequestHandler
+    from socketserver import TCPServer
     args = sys.argv[1:]
     model, port = args[args.index("--model") + 1], int(args[args.index("--port") + 1])
     assert os.environ["HF_HUB_OFFLINE"] == "1"
@@ -1340,7 +1350,8 @@ FAKE_SERVER = textwrap.dedent("""\
             self.wfile.write(json.dumps(data).encode())
         def log_message(self, *a):
             pass
-    HTTPServer(("127.0.0.1", port), Handler).serve_forever()
+    # HTTPServer resolves the host name, which a broken resolver holds for 35 s.
+    TCPServer(("127.0.0.1", port), Handler).serve_forever()
     """)
 
 
@@ -1943,6 +1954,42 @@ class TestAdminAPI:
         (row,) = admin_routes._external_engines_for_model(pool, info, None)
         assert row["draft_repo"] is None
 
+    @pytest.mark.parametrize("engine, expected", [("splash", False), (None, True)])
+    def test_model_list_marks_mtp_unused_on_an_external_engine(
+        self, tmp_path, engine, expected
+    ):
+        model = _write_model(tmp_path / "models" / "Qwen3.8-27B-4bit-mtp")
+        config = json.loads((model / "config.json").read_text())
+        config["text_config"]["mtp_num_hidden_layers"] = 1
+        (model / "config.json").write_text(json.dumps(config))
+        (model / "model.safetensors.index.json").write_text(
+            json.dumps({"weight_map": {"mtp.fc.weight": "model.safetensors"}})
+        )
+        pool = MagicMock()
+        pool.get_status.return_value = {
+            "models": [{"id": "Qwen3.8-27B-4bit-mtp", "model_path": str(model)}]
+        }
+        manager = MagicMock()
+        manager.get_all_settings.return_value = {
+            "Qwen3.8-27B-4bit-mtp": ModelSettings(external_engine=engine)
+        }
+
+        with (
+            patch.object(admin_routes, "_get_engine_pool", return_value=pool),
+            patch.object(admin_routes, "_get_settings_manager", return_value=manager),
+            patch.object(
+                admin_routes,
+                "_get_server_state",
+                return_value=MagicMock(default_model=None),
+            ),
+            patch.object(admin_routes, "_get_global_settings", return_value=None),
+        ):
+            row = asyncio.run(admin_routes.list_models(is_admin=True))["models"][0]
+
+        assert row["mtp_compatible"] is expected
+        if not expected:
+            assert "external engine" in row["mtp_compatibility_reason"]
+
 
 # -- native response_format ---------------------------------------------------
 
@@ -1985,6 +2032,8 @@ class TestNativeResponseFormat:
             engine.start = AsyncMock()
             engine.count_chat_tokens.return_value = 10
             pool = MagicMock()
+            # A mock cache dir makes lifespan create MagicMock/ dirs in CWD.
+            pool._scheduler_config.paged_ssd_cache_dir = None
             pool.preload_pinned_models = AsyncMock()
             pool.check_ttl_expirations = AsyncMock()
             pool.shutdown = AsyncMock()
@@ -2163,7 +2212,7 @@ class TestProcessMemory:
             "base_url": "http://127.0.0.1:8123/v1",
             "api_key": "secret",
             "model": REPO_ID,
-            "extra_body": {"reasoning_effort": "none"},
+            "extra_body": {"reasoning_effort": "none", "ignore_eos": True},
         }
 
 
@@ -2199,7 +2248,13 @@ class TestSplashBenchmark:
         assert bench.overhead == 0
         assert bench.prompt(100) == "tokens:100"
 
-    async def test_run_benchmark_against_splash_endpoint(self, monkeypatch):
+    @pytest.mark.parametrize(
+        ("saved_window", "launch_window"),
+        [(None, None), (1024, 1024 + 128), (131072, None)],
+    )
+    async def test_run_benchmark_against_splash_endpoint(
+        self, monkeypatch, saved_window, launch_window
+    ):
         stats = StreamStats(
             prompt_tokens=1000,
             completion_tokens=100,
@@ -2224,6 +2279,11 @@ class TestSplashBenchmark:
         pool.get_entry.return_value = SimpleNamespace(
             model_type="qwen3_5", model_settings=None, model_path=Path("/tmp/model")
         )
+        settings = ModelSettings(
+            external_engine="splash", max_context_window=saved_window
+        )
+        pool._settings_manager.get_settings.return_value = settings
+        pool.external_engine_id.return_value = "splash"
         run = BenchmarkRun(
             bench_id="splash-run-1",
             request=BenchmarkRequest(
@@ -2234,6 +2294,10 @@ class TestSplashBenchmark:
         await run_benchmark(run, pool)
 
         client.aclose.assert_awaited_once()
+        # Only a saved window shorter than the run grows, and only for this launch.
+        runtime_settings = pool.get_engine.await_args.kwargs["runtime_settings"]
+        assert getattr(runtime_settings, "max_context_window", None) == launch_window
+        assert settings.max_context_window == saved_window
         results = {r["test_type"]: r for r in run.results}
         assert (results["single"]["requested_pp"], results["single"]["pp"]) == (
             1024,
@@ -2270,6 +2334,25 @@ class TestSplashRuntimeCache:
         assert engine._status == payload
         await engine.stop()
         assert engine._status_task is None
+
+    async def test_status_refresh_keeps_a_cancel_raised_as_timeout(self, tmp_path):
+        # Older anyio raises the request timeout in place of a cancel that
+        # lands with the deadline.
+        fetching = asyncio.Event()
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            fetching.set()
+            try:
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                raise httpx.ReadTimeout("timed out", request=request) from None
+
+        engine = _engine_with_transport(tmp_path, handler)
+        task = asyncio.create_task(engine._refresh_status())
+        await fetching.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
 
     def test_cache_dashboard_lists_splash_next_to_mlx(self, tmp_path):
         settings = SimpleNamespace(

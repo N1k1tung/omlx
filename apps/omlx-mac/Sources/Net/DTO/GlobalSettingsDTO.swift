@@ -76,6 +76,8 @@ struct GlobalSettingsDTO: Codable, Equatable, Sendable {
         /// "context" (default) | "speed" — what the prefill memory guard
         /// optimizes under pressure.
         let prefillPriority: String?
+        /// "prefill" | "balanced" (default) | "decode": how prefill shares the GPU.
+        let concurrentPriority: String?
     }
 
     struct CacheSettings: Codable, Equatable, Sendable {
@@ -190,6 +192,19 @@ struct GlobalSettingsDTO: Codable, Equatable, Sendable {
         let hermesModel: String?
         let copilotModel: String?
         let dshModel: String?
+        let markitdownEnabled: Bool?
+        let markitdownExposeModel: Bool?
+        let markitdownMaxFileSizeMb: Int?
+        let markitdownMaxFilesPerRequest: Int?
+        let markitdownPdfProcessingEngine: String?
+        let webSearchProvider: String?
+        let webSearchBraveApiKey: String?
+        let webSearchSearxngUrl: String?
+        let webSearchDdgsBackends: String?
+        let webSearchMaxResults: Int?
+        let webSearchContentMode: String?
+        let webSearchContentTruncate: Bool?
+        let webSearchContentMaxChars: Int?
         /// Splash launcher path; nil means the server detects it.
         let splashPath: String?
         let splashKvFormat: String?
@@ -296,6 +311,23 @@ struct GlobalSettingsPatch: Encodable, Equatable, Sendable {
     var integrationsCopilotModel: String? = nil
     var integrationsDshModel: String? = nil
 
+    // MarkItDown document conversion.
+    var markitdownEnabled: Bool? = nil
+    var markitdownExposeModel: Bool? = nil
+    var markitdownMaxFileSizeMb: Int? = nil
+    var markitdownMaxFilesPerRequest: Int? = nil
+    var markitdownPdfProcessingEngine: String? = nil
+
+    // Shared web search settings.
+    var webSearchProvider: String? = nil
+    var webSearchBraveApiKey: String? = nil
+    var webSearchSearxngUrl: String? = nil
+    var webSearchDdgsBackends: String? = nil
+    var webSearchMaxResults: Int? = nil
+    var webSearchContentMode: String? = nil
+    var webSearchContentTruncate: Bool? = nil
+    var webSearchContentMaxChars: Int? = nil
+
     // External engines: Splash. An empty path returns to automatic
     // detection; `.null` sizes return to automatic sizing.
     var splashPath: String? = nil
@@ -377,6 +409,7 @@ struct GlobalSettingsPatch: Encodable, Equatable, Sendable {
     /// Multi-block prefill — splits long prompts across scheduler ticks.
     var chunkedPrefill: Bool? = nil
     var prefillPriority: String? = nil
+    var concurrentPriority: String? = nil
 
     var cacheEnabled: Bool? = nil
     var hotCacheOnly: Bool? = nil
@@ -396,4 +429,28 @@ struct UpdateGlobalSettingsResponse: Decodable, Sendable {
     let success: Bool
     let message: String?
     let runtimeApplied: [String]?
+}
+
+struct WebSearchTestRequest: Encodable, Equatable, Sendable {
+    let provider: String
+    let braveApiKey: String
+    let searxngUrl: String
+    let ddgsBackends: String
+    let maxResults: Int
+}
+
+struct WebSearchTestResponse: Decodable, Sendable {
+    struct Result: Decodable, Sendable {
+        let title: String
+        let url: String
+        let snippet: String
+    }
+
+    struct Failure: Decodable, Sendable {
+        let message: String
+    }
+
+    let ok: Bool
+    let results: [Result]?
+    let error: Failure?
 }

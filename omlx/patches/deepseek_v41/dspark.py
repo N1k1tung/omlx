@@ -243,6 +243,14 @@ def forward_spec(model, input_ids, main_hidden, cache, *, temperature=0.0):
 
 def proposal_forward(model, input_ids, cache, draft_length=None):
     """Compute parallel draft logits; the shared loop applies Markov biases."""
+    h = proposal_hidden(model, input_ids, cache, draft_length)
+    final = model.mtp[-1]
+    return project_logits(final.norm(h), model.head.weight), h
+
+
+def proposal_hidden(model, input_ids, cache, draft_length=None):
+    """The last stage's output of proposal_forward, before its norm and vocabulary head
+    (several requests' blocks can share one head projection)."""
     c = model._config
     width = max(1, min(draft_length or c.dspark_block_size, c.dspark_block_size))
     input_ids = input_ids.reshape(input_ids.shape[0], -1)[:, -1:]
@@ -261,13 +269,10 @@ def proposal_forward(model, input_ids, cache, draft_length=None):
     pre = mx.broadcast_to((mx.arange(c.hc_mult) == 0).astype(mx.float32), h.shape[:-1])
     for stage, item in zip(model.mtp, cache):
         h, pre = stage(h, pre, item)
-    final = model.mtp[-1]
-    h = hc_pre(h, pre)
-    logits = project_logits(final.norm(h), model.head.weight)
-    return logits, h
+    return hc_pre(h, pre)
 
 
-def _proposal_body(model):
+def _proposal_body(model, hidden_only=False):
     """Array-only DSpark proposal graph for ``mx.compile``.
 
     Stage caches are passed as their key arrays plus the already-built RoPE
@@ -297,31 +302,35 @@ def _proposal_body(model):
         )
         for stage, keys in zip(model.mtp, cache_keys):
             h, pre = stage(h, pre, SimpleNamespace(keys=keys, cos=cos, sin=sin))
-        final = model.mtp[-1]
         h = hc_pre(h, pre)
+        if hidden_only:
+            return h
+        final = model.mtp[-1]
         return project_logits(final.norm(h), model.head.weight), h
 
     return body
 
 
-def proposal_forward_compiled(model, input_ids, cache, draft_length=None):
+def proposal_forward_compiled(model, input_ids, cache, draft_length=None, *, hidden_only=False):
     """``proposal_forward`` in one compiled graph when the context is ready.
 
     The draft head is speculative, so only its acceptance rate changes; the
     target verifier still produces the emitted distribution. An empty or
     unwritten context falls back to the ordinary function. RoPE tables are
     built outside the graph and carried as array inputs, so advancing context
-    positions do not retrace the graph. Graphs are cached per draft width.
+    positions do not retrace the graph. Graphs are cached per draft width and
+    whether the vocabulary head is omitted for shared projection.
     """
     c = model._config
     width = max(1, min(draft_length or c.dspark_block_size, c.dspark_block_size))
     keys = tuple(item.keys for item in cache)
     offsets = tuple(item.offset for item in cache)
+    proposal = proposal_hidden if hidden_only else proposal_forward
     if len(keys) != len(model.mtp) or any(k is None for k in keys):
-        return proposal_forward(model, input_ids, cache, draft_length=draft_length)
+        return proposal(model, input_ids, cache, draft_length=draft_length)
     offset = offsets[0]
     if any(o != offset for o in offsets):
-        return proposal_forward(model, input_ids, cache, draft_length=draft_length)
+        return proposal(model, input_ids, cache, draft_length=draft_length)
     params = (
         c.rope_head_dim,
         c.rope_theta,
@@ -335,8 +344,9 @@ def proposal_forward_compiled(model, input_ids, cache, draft_length=None):
     if not isinstance(compiled, dict):
         compiled = {}
         object.__setattr__(model, "_omlx_dspark_proposal_compiled", compiled)
-    body = compiled.get(width)
+    key = (width, hidden_only)
+    body = compiled.get(key)
     if body is None:
-        body = mx.compile(_proposal_body(model))
-        compiled[width] = body
+        body = mx.compile(_proposal_body(model, hidden_only))
+        compiled[key] = body
     return body(input_ids, keys, cos, sin, width)

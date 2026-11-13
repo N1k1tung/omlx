@@ -226,12 +226,16 @@ def test_compiled_proposal_matches_plain_at_varying_width():
     # The graph is cached per width; changing the adaptive draft length must
     # neither retrace the advancing cache offset nor change the proposal.
     for width in (1, 2, 3, 4, 5):
+        model.dspark_append_context(step, raw)
+        hidden = model.dspark_hidden(step, anchor, comp, draft_length=width)
         plain = proposal_forward(model, anchor, raw, draft_length=width)
         compiled = proposal_forward_compiled(model, anchor, comp, draft_length=width)
-        mx.eval(plain, compiled)
+        mx.eval(plain, compiled, hidden)
         assert all(
             mx.array_equal(a, b).item() for a, b in zip(plain, compiled)
         )
+        assert mx.array_equal(hidden, plain[1]).item()
+        assert mx.array_equal(model.dspark_logits(hidden), plain[0]).item()
 
 
 def test_compiled_context_matches_plain_across_positions_and_widths():

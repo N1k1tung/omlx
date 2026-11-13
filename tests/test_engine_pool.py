@@ -13,11 +13,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import mlx.core as mx
 import pytest
 
+import omlx.engine_pool as engine_pool_module
 from omlx.engine_pool import (
     EngineEntry,
     EnginePool,
     VLMBatchedEngine,
-    _is_metal_out_of_memory,
     _qwen35_cpu_share_estimated_bytes,
 )
 from omlx.exceptions import (
@@ -27,6 +27,7 @@ from omlx.exceptions import (
     ModelNotFoundError,
     ModelTooLargeError,
     ModelUnavailableError,
+    is_metal_out_of_memory,
 )
 from omlx.model_settings import ModelSettings, ModelSettingsManager
 from omlx.patches.mlx_vlm_qwen4_exp_compat.residency import (
@@ -991,13 +992,14 @@ class TestQwenCpuShareMemoryEstimate:
         )
         pool._entries[entry.model_id] = entry
         settings = ModelSettings()
-        off = pool._engine_runtime_signature("v41", settings)
-        settings.deepseek_v41_ced_prefill_enabled = True
+        # Unset means on.
         on = pool._engine_runtime_signature("v41", settings)
-        assert off != on
         assert dict(on)["deepseek_v41_ced_prefill_enabled"] == "True"
         settings.deepseek_v41_ced_prefill_enabled = False
-        assert pool._engine_runtime_signature("v41", settings) == off
+        off = pool._engine_runtime_signature("v41", settings)
+        assert off != on
+        settings.deepseek_v41_ced_prefill_enabled = True
+        assert pool._engine_runtime_signature("v41", settings) == on
 
     def test_qwen4_wide_decode_setting_changes_engine_signature(self, tmp_path):
         from omlx.model_settings import ModelSettings
@@ -2102,7 +2104,7 @@ class TestEnginePoolAsync:
         assert second is base_engine
         base_engine.stop.assert_not_awaited()
 
-    def test_oq_a8_forces_a_separate_engine(self, pool_with_mock_engines):
+    def test_oq_a8_forces_a_separate_engine(self, pool_with_mock_engines, monkeypatch):
         """The patch replaces MLP.__call__ process-wide, registers process-wide
         projection backends, and caches a plan on every module it classifies;
         none of that can be undone in place, so a change here has to land on a
@@ -2115,16 +2117,37 @@ class TestEnginePoolAsync:
         other_floor = ModelSettings(a8_prefill_enabled=True, a8_prefill_min_tokens=1024)
 
         sig = lambda s: pool._engine_runtime_signature("model-a", s)  # noqa: E731
+        monkeypatch.setattr(
+            engine_pool_module.quant_fast, "oq_a8_available", lambda: True
+        )
         assert sig(off) != sig(on)
         assert sig(on) != sig(other_floor)
+        # Without INT8 tensor units only a Prefill Accelerator Mac uses it.
+        monkeypatch.setattr(
+            engine_pool_module.quant_fast, "oq_a8_available", lambda: False
+        )
+        assert sig(off) == sig(on)
+        # DeepSeek V4.1 tensor-parallel ranks load A8 by their own hardware.
+        tensor = SimpleNamespace(tensor_parallel_size=2)
+        monkeypatch.setattr(
+            pool, "_distributed_deployment_for_entry", lambda entry: tensor
+        )
+        assert sig(off) == sig(on)
+        pool._entries["model-a"].config_model_type = "deepseek_v41"
+        assert sig(off) != sig(on)
 
-    def test_oq_a8_toggle_changes_qwen4_exp_signature(self, pool_with_mock_engines):
+    def test_oq_a8_toggle_changes_qwen4_exp_signature(
+        self, pool_with_mock_engines, monkeypatch
+    ):
         """Flash-Next reloads on the same toggle, so routed-expert tags never
         outlive an OFF request (OFF -> ON -> OFF -> ON each get a new engine)."""
         from omlx.model_settings import ModelSettings
 
         pool = pool_with_mock_engines
         pool._entries["model-a"].config_model_type = "qwen4_exp"
+        monkeypatch.setattr(
+            engine_pool_module.quant_fast, "oq_a8_available", lambda: True
+        )
         sig = lambda enabled: pool._engine_runtime_signature(  # noqa: E731
             "model-a", ModelSettings(a8_prefill_enabled=enabled)
         )
@@ -5792,7 +5815,7 @@ async def test_local_cluster_removal_preserves_busy_guard_and_scope(busy):
 
 
 class TestIsMetalOutOfMemory:
-    """``_is_metal_out_of_memory`` walks the cause chain of a failed load."""
+    """``is_metal_out_of_memory`` walks the cause chain of a failed load."""
 
     def test_cause_cycles_terminate(self):
         exc = ImportError("VoxtralProcessor requires the PyTorch library")
@@ -5800,12 +5823,12 @@ class TestIsMetalOutOfMemory:
         a, b = RuntimeError("a"), RuntimeError("b")
         a.__cause__, b.__cause__ = b, a
 
-        assert _is_metal_out_of_memory(exc) is False
-        assert _is_metal_out_of_memory(a) is False
+        assert is_metal_out_of_memory(exc) is False
+        assert is_metal_out_of_memory(a) is False
 
     def test_out_of_memory_found_down_the_chain(self):
         oom = RuntimeError("[METAL] Command buffer execution failed: Insufficient Memory")
         outer = RuntimeError("load failed")
         outer.__cause__ = oom
 
-        assert _is_metal_out_of_memory(outer) is True
+        assert is_metal_out_of_memory(outer) is True

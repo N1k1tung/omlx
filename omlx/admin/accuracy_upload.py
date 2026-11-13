@@ -37,7 +37,9 @@ from .benchmark import (
     _derive_feature_flags,
     _detect_quantization,
     _filter_uploaded_settings,
+    _prefill_helper_details,
     _sanitize_upload_error,
+    _setting_feature_flags,
     _upload_model_name,
     _upload_model_repo,
 )
@@ -98,8 +100,23 @@ def build_upload_context(request: Any, engine_pool: Any) -> dict:
     if sm is not None:
         try:
             ms = sm.get_settings(request.model_id)
-            feature_flags = _derive_feature_flags(ms)
-            model_settings = _filter_uploaded_settings(ms)
+            model_type = (
+                str(getattr(entry, "config_model_type", "") or "")
+                .replace("-", "_")
+                .lower()
+            )
+            helper = _prefill_helper_details(getattr(entry, "engine", None))
+            feature_flags = _derive_feature_flags(ms) + _setting_feature_flags(
+                ms, model_type, helper_a8=bool(helper and helper["a8"])
+            )
+            model_settings = _filter_uploaded_settings(ms, model_type)
+            if helper is not None and model_settings is not None:
+                feature_flags.append(
+                    {"key": "prefill_accelerator", "label": "Prefill Accelerator"}
+                )
+                model_settings["prefill_accelerator"] = {
+                    key: value for key, value in helper.items() if key != "a8"
+                }
         except Exception as e:  # noqa: BLE001
             logger.warning(
                 f"Accuracy upload: failed to read settings for "
@@ -258,6 +275,7 @@ async def _do_upload(ctx: dict, result_data: dict) -> dict:
         "dataset_total": result_data.get("dataset_total"),
         "time_s": result_data.get("time_s"),
         "thinking_used": bool(result_data.get("thinking_used")),
+        "question_max_tokens": result_data.get("max_tokens"),
         "sampling_profile": ctx["sampling_profile"],
         "batch_size": ctx["batch_size"],
         "category_scores": result_data.get("category_scores"),

@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 from omlx.patches.deepseek_v41.oq import copy_engram, quantize_engram, source_budget
-from omlx.patches.deepseek_v41.storage import DiskEngramEmbedding, EngramPrefetch
+from omlx.patches.deepseek_v41.storage import DiskEngramEmbedding, EngramPrefetch, decode_rows
 
 
 def test_shards_pack_small_groups_without_splitting_quantized_projection(tmp_path):
@@ -144,6 +144,11 @@ def test_copied_fp8_engram_keeps_source_bytes_and_rows(tmp_path):
         ids = mx.array([[0, 7, 39], [12, 12, 3]])
         np.testing.assert_array_equal(
             original(ids).astype(mx.float32), exported(ids).astype(mx.float32)
+        )
+        data, settings = exported.read_packed(np.asarray(ids))
+        np.testing.assert_array_equal(
+            original(ids).astype(mx.float32),
+            decode_rows(data, ids.shape, *settings).astype(mx.float32),
         )
     finally:
         original.close()

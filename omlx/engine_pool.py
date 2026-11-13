@@ -65,6 +65,7 @@ from .exceptions import (
     ModelTooLargeError,
     ModelUnavailableError,
     describe_ceiling_binding,
+    is_metal_out_of_memory,
 )
 from .model_discovery import (
     VLM_NATIVE_TEXT_MODEL_TYPES,
@@ -72,14 +73,20 @@ from .model_discovery import (
     format_size,
     is_realtime_stt_model,
 )
+from .custom_kernels.quant_matmul import fast as quant_fast
 from .model_settings import (
     ModelSettings,
+    a8_prefill_on,
+    ced_prefill_on,
     ane_prefill_backend,
     ane_prefill_fraction,
     validate_ane_prefill,
 )
 from .patches.minimax_m3_dspark import bundled_dspark_path, load_minimax_dspark_drafter
 from .patches.qwen35_yarn import yarn_factor
+from .prefill_helper.adapters import adapter_for_model as prefill_stage_adapter
+from .prefill_helper.lending import lending_note
+from .prefill_helper.manager import prepare as prepare_prefill_helper
 from .scheduler import SchedulerConfig
 from .settings import get_settings as get_global_settings
 from .speculative.dflash import context_bytes_per_row, load_dflash_drafter
@@ -303,22 +310,6 @@ def _settled_phys_footprint() -> int:
     return max(0, get_phys_footprint() - unreleased_graphics_bytes(mlx_bytes))
 
 
-def _is_metal_out_of_memory(exc: BaseException | None) -> bool:
-    # Track visited exceptions: a cause chain can loop (an exception raised
-    # ``from`` itself), and this runs on the event loop during a failed load.
-    seen: set[int] = set()
-    while exc is not None and id(exc) not in seen:
-        seen.add(id(exc))
-        text = str(exc)
-        if (
-            "kIOGPUCommandBufferCallbackErrorOutOfMemory" in text
-            or "Insufficient Memory" in text
-        ):
-            return True
-        exc = exc.__cause__
-    return False
-
-
 def _set_concurrency_limits(config: object, value: int) -> None:
     config.max_num_seqs = value
     config.completion_batch_size = value
@@ -491,12 +482,25 @@ class EnginePool:
         # Idle GPU keep-warm ticker (see _touch_gpu). Configured by the server
         # from ServerSettings.gpu_keep_warm_interval; started on first load.
         self._gpu_keep_warm_interval: float = 0.0
+        self._gpu_keep_warm_idle_window: float = _GPU_KEEP_WARM_IDLE_WINDOW_S
         self._gpu_keep_warm_task: asyncio.Task[None] | None = None
         self._gpu_keep_warm_last_active = 0.0
         self.configure_hot_cache_budget()
 
-    def configure_gpu_keep_warm(self, interval_seconds: float) -> None:
-        """Set the idle keep-warm period in seconds (0 or less disables it)."""
+    def configure_gpu_keep_warm(
+        self, interval_seconds: float, idle_window_seconds: float | None = None
+    ) -> None:
+        """Set the idle keep-warm period in seconds (0 or less disables it).
+
+        ``idle_window_seconds`` is how long after the last request the ticks
+        keep running; None keeps the current window.
+        """
+        if idle_window_seconds is not None:
+            try:
+                window = float(idle_window_seconds)
+            except (TypeError, ValueError):
+                window = _GPU_KEEP_WARM_IDLE_WINDOW_S
+            self._gpu_keep_warm_idle_window = max(0.0, window)
         try:
             interval = float(interval_seconds or 0.0)
         except (TypeError, ValueError):
@@ -531,7 +535,7 @@ class EnginePool:
                 return False
             # Leases refresh last_access at both request start and completion.
             last_request = max(last_request, entry.last_access)
-        return loaded and now - last_request < _GPU_KEEP_WARM_IDLE_WINDOW_S
+        return loaded and now - last_request < self._gpu_keep_warm_idle_window
 
     async def _gpu_keep_warm_loop(self) -> None:
         loop = asyncio.get_running_loop()
@@ -1315,7 +1319,7 @@ class EnginePool:
             add("deepseek_v41_engram_ssd_offload", v41_offload)
             add(
                 "deepseek_v41_ced_prefill_enabled",
-                getattr(settings, "deepseek_v41_ced_prefill_enabled", False),
+                ced_prefill_on(settings),
             )
             factor = yarn_factor(
                 entry.config_model_type,
@@ -1336,7 +1340,18 @@ class EnginePool:
         # process-wide projection backends, and caches a prepared plan and
         # metadata on every module it classifies. None of that can be undone
         # in place, so a change here has to land on a fresh engine.
-        oq_a8_active = bool(data.get("a8_prefill_enabled", False))
+        # Without INT8 tensor units here, A8 only reaches a Prefill Accelerator
+        # Mac's layers, which follow it without reloading this model. DeepSeek
+        # V4.1 tensor-parallel ranks load A8 by their own hardware, so it reloads.
+        deployment = (
+            self._distributed_deployment_for_entry(entry) if entry is not None else None
+        )
+        rank_a8 = (
+            deployment is not None
+            and deployment.tensor_parallel_size > 1
+            and entry.config_model_type == "deepseek_v41"
+        )
+        oq_a8_active = a8_prefill_on(data) and (quant_fast.oq_a8_available() or rank_a8)
         add("a8_prefill_enabled", oq_a8_active)
         if oq_a8_active:
             add("a8_prefill_min_tokens", data.get("a8_prefill_min_tokens", 128))
@@ -2390,6 +2405,32 @@ class EnginePool:
                 logger.debug("external process memory read failed", exc_info=True)
         return total
 
+    def _start_prefill_helper_early(self, entry: Any, settings: Any) -> bool:
+        """Start the chosen Prefill Accelerator while this Mac loads the model."""
+        node_id = getattr(settings, "prefill_helper_node_id", None)
+        model_type = (entry.config_model_type or "").replace("-", "_").lower()
+        adapter = prefill_stage_adapter(
+            entry.config_model_type, entry.engine_type, entry.model_path
+        )
+        if node_id is None or adapter is None:
+            return False
+        prepare_prefill_helper(
+            entry.model_path,
+            adapter,
+            node_id,
+            getattr(settings, "prefill_helper_layers", None),
+            launch={
+                "model_type": model_type,
+                "warm_tokens": self._scheduler_config.prefill_step_size,
+                "a8_min_tokens": (
+                    int(getattr(settings, "a8_prefill_min_tokens", 128))
+                    if a8_prefill_on(settings)
+                    else None
+                ),
+            },
+        )
+        return True
+
     def _validate_llm_engine_ready(self, model_id: str, engine: object | None) -> None:
         if engine is None:
             raise ModelLoadingError(
@@ -3010,6 +3051,7 @@ class EnginePool:
                             f"({failure_label}: {format_size(failure_current)}, "
                             f"{admission_kind}: {format_size(admission_size)}). "
                             f"{advice or DEFAULT_CEILING_ADVICE}."
+                            f"{lending_note()}"
                         ),
                     )
 
@@ -4227,6 +4269,7 @@ class EnginePool:
                         ),
                         model_settings=model_settings,
                         vision_checkpoint=entry.model_type == "vlm",
+                        config_model_type=entry.config_model_type,
                     )
                     logger.info(
                         "Distributed inference enabled for %s: ranks=%d "
@@ -4287,6 +4330,9 @@ class EnginePool:
 
             if isinstance(engine, SplashEngine):
                 self._starting_external[model_id] = engine
+            early_helper = hasattr(
+                type(engine), "prefill_helper"
+            ) and self._start_prefill_helper_early(entry, model_settings)
             try:
                 await self._start_engine(engine)
             except Exception as start_error:
@@ -4374,6 +4420,9 @@ class EnginePool:
                     raise
             finally:
                 self._starting_external.pop(model_id, None)
+                if early_helper and getattr(engine, "prefill_helper", None) is None:
+                    # No loaded model will take the started helper over.
+                    prepare_prefill_helper(entry.model_path, None, None, None)
 
             # Check if memory enforcer requested abort during loading
             if entry.abort_loading:
@@ -4613,7 +4662,7 @@ class EnginePool:
             if (
                 not entry.abort_loading
                 and not entry_detached
-                and _is_metal_out_of_memory(exc)
+                and is_metal_out_of_memory(exc)
             ):
                 # Depends on what else is resident, so do not cache it: a retry
                 # after memory is freed can succeed with the same files.
