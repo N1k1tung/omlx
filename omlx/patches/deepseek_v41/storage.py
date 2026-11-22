@@ -49,6 +49,9 @@ _PAGE_IO_POOL = ThreadPoolExecutor(
 ROW_BATCH_ROWS = 256
 ROW_BATCH_MAX_GAP = 65536
 ROW_READ_RETRY_SECONDS = 60.0
+# Lookups up to this many rows (a decode token, a short verify block) advise
+# their pages, then copy from the mapping: missing pages read all at once.
+ADVISE_MAX_ROWS = 64
 
 # mincore observes the file cache without faulting the mapping into memory.
 _MINCORE = ctypes.CDLL(None).mincore
@@ -157,6 +160,25 @@ class TensorFile:
             self._file.close()
             raise
 
+    def advise_rows(self, key, rows):
+        """Start reading the pages of ``rows`` of ``key`` in the background."""
+        with self._lock:
+            entry = self.header[key]
+            rows = np.asarray(rows, dtype=np.intp).reshape(-1)
+            if not rows.size:
+                return
+            row_count = entry["shape"][0]
+            if rows.min() < 0 or rows.max() >= row_count:
+                raise IndexError("Engram row outside table")
+            start, end = entry["data_offsets"]
+            row_bytes = (end - start) // row_count
+            if not row_bytes:
+                return
+            offsets = self._start + start + rows * row_bytes
+            first, last = offsets // PAGE_SIZE, (offsets + row_bytes - 1) // PAGE_SIZE
+            for page in np.unique(np.concatenate((first, last))).tolist():
+                self._mapping.madvise(mmap.MADV_WILLNEED, page * PAGE_SIZE, PAGE_SIZE)
+
     def read(self, key, rows=None, *, metal_backed=False):
         with self._lock:
             if self._mapping is None:
@@ -212,6 +234,14 @@ class TensorFile:
                 gather_rows = rows.size
                 copied = None
                 row_bytes = (end - start) // view.shape[0] if view.shape[0] else 0
+                if rows.size <= ADVISE_MAX_ROWS and 0 < row_bytes <= PAGE_SIZE:
+                    # _read_rows advised these pages, so the copy waits about one read.
+                    fresh, _ = self._unseen_rows(
+                        rows.reshape(-1), self._start + start, row_bytes
+                    )
+                    copied = view[rows]
+                    self._seen_pages[fresh] = 1
+                    return copied, dtype
                 if rows.size and 0 < row_bytes <= PAGE_SIZE:
                     base = self._start + start
                     flat = rows.reshape(-1)
@@ -480,38 +510,32 @@ class DiskEngramEmbedding(nn.Module):
         with self._lock:
             if self._closed:
                 raise RuntimeError("Engram embedding is closed")
-            if self._packed:
-                rows = host.reshape(-1)
-                if self._resident is None:
-                    raw, dtype = self._weights.read(self._weight_key, rows)
-                else:
-                    raw, dtype = self._resident[self._weight_key]
-                    if rows.size and (rows.min() < 0 or rows.max() >= raw.shape[0]):
-                        raise IndexError("Engram row outside table")
-                    raw = raw[rows]
-                width = self._packed_width
-                if dtype != "U8" or raw.shape[-1] != width + width // 32:
-                    raise ValueError("Packed Engram row geometry mismatch")
-                return [
-                    (raw[..., :width], "F8_E4M3"),
-                    (raw[..., width:], "F8_E8M0"),
-                ]
+            rows = host.reshape(-1)
+            pairs = ((self._weights, self._weight_key),)
+            if not self._packed:
+                pairs += ((self._scales, self._scale_key), (self._scales, self._bias_key))
+            if self._resident is None and rows.size <= ADVISE_MAX_ROWS:
+                # Start reading all selected tensors before copying any.
+                for reader, key in pairs:
+                    if key is not None:
+                        reader.advise_rows(key, rows)
             result = []
-            for reader, key in (
-                (self._weights, self._weight_key),
-                (self._scales, self._scale_key),
-                (self._scales, self._bias_key),
-            ):
+            for reader, key in pairs:
                 if key is None:
                     continue
                 if self._resident is None:
-                    result.append(reader.read(key, host.reshape(-1)))
+                    result.append(reader.read(key, rows))
                 else:
                     raw, dtype = self._resident[key]
-                    rows = host.reshape(-1)
                     if rows.size and (rows.min() < 0 or rows.max() >= raw.shape[0]):
                         raise IndexError("Engram row outside table")
                     result.append((raw[rows], dtype))
+            if self._packed:
+                raw, dtype = result[0]
+                width = self._packed_width
+                if dtype != "U8" or raw.shape[-1] != width + width // 32:
+                    raise ValueError("Packed Engram row geometry mismatch")
+                return [(raw[..., :width], "F8_E4M3"), (raw[..., width:], "F8_E8M0")]
             return result
 
     def read_packed(self, host):
