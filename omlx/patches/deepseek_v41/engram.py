@@ -134,7 +134,9 @@ class NgramHash:
         return np.concatenate(hashes, -1) + self.offsets, joined[:, -depth:]
 
 
-# Inputs of up to this many rows (batched decode, MTP verify) are projected row by row.
+# Inputs of up to this many rows (batched decode, MTP verify) keep each row's own
+# arithmetic: MXFP8 with one weight read, packed GGUF with one read per three rows,
+# any other layout row by row.
 def _project_each(p, flat):
     """p applied to each row of flat ([count, k]) on its own, with one weight read for all
     rows (mxfp8_gemv_each), or None if p is not an MXFP8 projection."""
@@ -144,6 +146,32 @@ def _project_each(p, flat):
     parts = [mxfp8_gemv_each(x[i : i + 8], p.weight, p.scales) for i in range(0, x.shape[0], 8)]
     if any(part is None for part in parts):
         return None
+    return parts[0] if len(parts) == 1 else mx.concatenate(parts, 0)
+
+
+def _project_rows(p, flat):
+    """p applied to each row of flat ([count, k]) with one weight read per few rows, or
+    None unless p is a packed GGUF projection of 2..16 rows. Its rows kernel replays
+    each row's single-token accumulation order (gguf_rows_nb), so the result matches the
+    per-row calls bit for bit while reading the weight once instead of once per row.
+
+    The chunk and the two-rows-a-simdgroup layout are measured on this projection
+    ([25600, 6144] Q6_K, 129 MB, M5 Ultra): one read decodes in 0.33 ms whatever it
+    feeds, and from six vectors a thread's accumulators spill, so six rows take 0.49 ms
+    as 3+3 where one six-vector call takes 0.88 ms and the per-row calls it replaces took
+    1.18 ms. Sixteen rows take 0.88 ms as 4x4 against 1.29 ms as 6x3 and 2.6 ms per row."""
+    from .gguf_quant import GGUFProjection, rows_projection
+
+    if not isinstance(p, GGUFProjection) or p.weight.ndim != 2:
+        return None
+    rows = flat.shape[0]
+    if not 2 <= rows <= 16:
+        return None
+    chunk = 3 if rows <= 8 else 4
+    parts = [
+        rows_projection(p, flat[i : i + chunk], rows_per_simdgroup=2, simdgroups=4)
+        for i in range(0, rows, chunk)
+    ]
     return parts[0] if len(parts) == 1 else mx.concatenate(parts, 0)
 
 
@@ -178,6 +206,10 @@ class Engram(nn.Module):
             # fp32 sums round differently (the reference leaves GEMM order free, but a
             # token's output would then depend on its batch or on speculation).
             kv = _project_each(self.wkv, rows.reshape(count, -1))
+            if kv is None:
+                # A packed GGUF weight has a rows kernel that keeps each row's
+                # single-token order, so it may read the weight once for several rows.
+                kv = _project_rows(self.wkv, rows.reshape(count, -1))
             if kv is None:
                 flat = rows.reshape(count, 1, -1)
                 kv = mx.concatenate([self.wkv(flat[r : r + 1]) for r in range(count)])

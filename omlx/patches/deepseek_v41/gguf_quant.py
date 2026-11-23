@@ -353,16 +353,16 @@ def prefill_plan(x, indices, num_experts):
 
 
 @cache
-def _rows_kernel(qtype):
+def _rows_kernel(qtype, simdgroups=8):
     block, size, name = FORMATS[qtype]
     return mx.fast.metal_kernel(
-        name=f"v41_gguf_{name}_rows",
+        name=f"v41_gguf_{name}_rows_{simdgroups}",
         input_names=["x", "w"],
         output_names=["out"],
         header=header(),
         source=f"""
             const uint lane = thread_index_in_simdgroup;
-            const uint row0 = (threadgroup_position_in_grid.x * 8 + simdgroup_index_in_threadgroup) * ROWS;
+            const uint row0 = (threadgroup_position_in_grid.x * {simdgroups} + simdgroup_index_in_threadgroup) * ROWS;
             if (row0 >= N) return;
             float acc[ROWS * NB];
             gguf_rows_nb<K, ROWS, NB, {qtype}, {block}, {size}>(w, row0, x, K, lane, acc);
@@ -370,6 +370,49 @@ def _rows_kernel(qtype):
                 for (uint b = 0; b < NB; ++b) out[size_t(b) * N + row0 + lane] = O(acc[lane * NB + b]);
         """,
     )
+
+
+def rows_projection(projection, x, rows_per_simdgroup=4, simdgroups=8):
+    """``projection(x)`` for 2..16 rows of a packed dense weight, reading each block once.
+
+    ``gguf_rows_nb`` keeps every row's single-token accumulation order: the same lane
+    stride, the same eight products per block in the same order, one fp32 chain per
+    output row, then ``simd_sum``. A row's output therefore does not depend on how many
+    rows run with it, which is why decode-sized callers that must stay bit-identical to
+    per-row decode use this instead of a multi-row ``quantized_matmul`` (whose fp32 sums
+    round differently). x is [rows, input_dims]; returns [rows, output_dims] in x's dtype.
+
+    ``rows_per_simdgroup`` and ``simdgroups`` only set how many output rows a
+    threadgroup covers, never a row's arithmetic. Their defaults are the shape the
+    existing callers were measured on; a projection with many input blocks wants fewer
+    rows a simdgroup so the grid has more threadgroups (Engram's wkv: rows_per_simdgroup
+    two, four simdgroups).
+    """
+    rows = x.shape[0]
+    per_lane = rows_per_simdgroup if projection.output_dims % rows_per_simdgroup == 0 else 1
+    return _rows_kernel(projection.qtype, simdgroups)(
+        inputs=[
+            mx.contiguous(x.reshape(rows, projection.input_dims)),
+            projection.weight,
+        ],
+        template=[
+            ("K", projection.input_dims),
+            ("N", projection.output_dims),
+            ("NB", rows),
+            ("ROWS", per_lane),
+            ("O", x.dtype),
+        ],
+        grid=(
+            (projection.output_dims + simdgroups * per_lane - 1)
+            // (simdgroups * per_lane)
+            * (simdgroups * 32),
+            1,
+            1,
+        ),
+        threadgroup=(simdgroups * 32, 1, 1),
+        output_shapes=[(rows, projection.output_dims)],
+        output_dtypes=[x.dtype],
+    )[0]
 
 
 class GGUFProjection(nn.Module):
@@ -413,28 +456,9 @@ class GGUFProjection(nn.Module):
             shape = (*x.shape[:-1], self.output_dims)
             rows = x.size // self.input_dims
             if 2 <= rows <= 16 and self.output_dims >= 8192 and self.input_dims <= 2048:
-                per_lane = 4 if self.output_dims % 4 == 0 else 1
-                return _rows_kernel(self.qtype)(
-                    inputs=[
-                        mx.contiguous(x.reshape(rows, self.input_dims)),
-                        self.weight,
-                    ],
-                    template=[
-                        ("K", self.input_dims),
-                        ("N", self.output_dims),
-                        ("NB", rows),
-                        ("ROWS", per_lane),
-                        ("O", x.dtype),
-                    ],
-                    grid=(
-                        (self.output_dims + 8 * per_lane - 1) // (8 * per_lane) * 256,
-                        1,
-                        1,
-                    ),
-                    threadgroup=(256, 1, 1),
-                    output_shapes=[shape],
-                    output_dtypes=[x.dtype],
-                )[0]
+                return rows_projection(self, x.reshape(rows, self.input_dims)).reshape(
+                    shape
+                )
             dense = getattr(self, "_dense", None)
             if (
                 rows >= 32
