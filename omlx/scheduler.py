@@ -69,11 +69,12 @@ from .exceptions import (
     describe_ceiling_binding,
     is_cache_corruption_error,
 )
+from .patches.inkling2 import INKLING2_MODEL_TYPES
+from .patches.inkling2.kernels import (
+    prefill_mask_elements as inkling2_prefill_mask_elements,
+)
 from .patches.mlx_lm_mtp import prompt_priming as _mtp_priming
 from .patches.mlx_lm_mtp.batch_generator import _drafter_for as _block_drafter_for
-from .patches.mlx_lm_mtp.batch_generator import (
-    _spec_command_buffers as _decode_command_buffers,
-)
 from .patches.mlx_lm_mtp.batch_generator import interrupt_batch_timing
 from .patches.vlm_batch_kv_capacity import (
     allow_early_kv_growth,
@@ -129,7 +130,11 @@ from .utils.metal_sync import (
     unreleased_graphics_bytes,
 )
 from .utils.proc_memory import get_graphics_footprint, get_phys_footprint
-from .utils.sampling import make_no_repeat_ngram_processor, select_logprobs
+from .utils.sampling import (
+    make_no_repeat_ngram_processor,
+    seed_request_stream,
+    select_logprobs,
+)
 from .utils.sampling import make_sampler as omlx_make_sampler
 from .utils.sampling import make_shared_sampler as omlx_make_shared_sampler
 from .utils.tokenizer import create_streaming_detokenizer
@@ -915,10 +920,6 @@ def _omlx_advance_grammar_rows(self) -> None:
 
 _original_generation_batch_step = GenerationBatch._step
 
-# Decode of small-active MoE models is bound by command-buffer commits. Dense
-# decode keeps MLX's caps because larger buffers slow it on M5.
-_DECODE_CAPS_TYPES = frozenset({"qwen3_5_moe", "qwen3_6_moe"})
-
 
 def _patched_generation_batch_step(self):
     # Build per-batch mRoPE deltas from UID mapping before each step.
@@ -941,9 +942,6 @@ def _patched_generation_batch_step(self):
     # is there to guarantee.
     _omlx_advance_grammar_rows(self)
 
-    if getattr(model, "model_type", None) in _DECODE_CAPS_TYPES:
-        with _decode_command_buffers(model):
-            return _original_generation_batch_step(self)
     return _original_generation_batch_step(self)
 
 
@@ -1502,6 +1500,20 @@ def _request_count(request: Any, name: str) -> int:
 def _requeue_row_state(request: Any) -> tuple | None:
     state = getattr(request, "requeue_row_state", None)
     return state if isinstance(state, tuple) else None
+
+
+def _start_request_stream(request: Request, requests: dict[str, Request]) -> None:
+    if _request_count(request, "requeued_output_tokens"):
+        return
+    seed = request.sampling_params.seed
+    if seed is None and any(
+        row.sampling_params.seed is not None
+        and row.generation_started_at is not None
+        and not row.is_finished()
+        for row in requests.values()
+    ):
+        return
+    seed_request_stream(seed)
 
 
 def _insert_max_tokens(request: Any) -> int:
@@ -2556,6 +2568,7 @@ class Scheduler:
         self._specprefill_draft_model: Any | None = None
         self._specprefill_default_keep_pct: float | None = None
         self._specprefill_default_threshold: int | None = None
+        self._specprefill_default_enabled = False
         self._draft_paged_ssd_cache_manager: Any | None = None
         self._draft_prefix_cache: Any | None = None
         # Track active specprefill request for RoPE cleanup
@@ -3401,6 +3414,9 @@ class Scheduler:
             floor = int(getattr(self, "_qwen35_prefill_floor", 0) or 0)
             if floor > hi and floor % window_size == 0:
                 lo = hi = floor
+        elif getattr(self.model, "model_type", None) == "hy_v4_flash":
+            # Top-16-of-512 routing leaves ~16 rows per expert at 512 tokens.
+            lo = hi = self._POOLING_ROTATING_BLOCK_SIZE
 
         if window_size >= hi or window_size >= lo:
             target_block_size = window_size
@@ -7751,11 +7767,7 @@ class Scheduler:
 
         Precondition: state.sampler, state.sm, state.per_row_lps are set.
         """
-        # A requeued row keeps the random stream it was already sampling from.
-        if request.sampling_params.seed is not None and not _request_count(
-            request, "requeued_output_tokens"
-        ):
-            mx.random.seed(request.sampling_params.seed)
+        _start_request_stream(request, self.requests)
 
         # #2219: both chunked-completion paths (inline first chunk and
         # _advance_chunked_prefills) funnel through here, but external VLM MTP
@@ -9451,7 +9463,9 @@ class Scheduler:
             if not isinstance(layer, dict):
                 continue
             class_name = str(layer.get("class_name") or "")
-            if class_name in _KNOWN_SLICEABLE_CACHE_TYPES:
+            if class_name in _KNOWN_SLICEABLE_CACHE_TYPES or (
+                Scheduler._is_kv_cachelist(layer)
+            ):
                 # Completion supplies a full cache. KV comes from paged
                 # blocks; serializing it here duplicates the entire prefix.
                 layer["state"] = ()
@@ -10147,9 +10161,23 @@ class Scheduler:
         return str(layer_state.get("cache_type") or "")
 
     @staticmethod
+    def _is_kv_cachelist(layer_state: dict[str, Any]) -> bool:
+        if layer_state.get("class_name") != "CacheList":
+            return False
+        meta = layer_state.get("meta_state")
+        names = meta[0] if isinstance(meta, (list, tuple)) and meta else None
+        return (
+            isinstance(names, (list, tuple))
+            and bool(names)
+            and all(name in ("KVCache", "BatchKVCache") for name in names)
+        )
+
+    @staticmethod
     def _is_sliceable_extracted_layer(layer_state: dict[str, Any]) -> bool:
         type_name = Scheduler._extracted_layer_type_name(layer_state)
         if type_name in _KNOWN_SLICEABLE_CACHE_TYPES:
+            return True
+        if Scheduler._is_kv_cachelist(layer_state):
             return True
 
         if HAS_CACHE_TYPE_HANDLERS and CacheTypeRegistry is not None and type_name:
@@ -11356,6 +11384,12 @@ class Scheduler:
                         block_table,
                         promote_to_hot_cache=not bypass_hot_cache,
                     )
+                    if reconstructed is None and self._gdn_split_active():
+                        retry = self._restore_shared_system_prefix(
+                            request, original_tokens, bypass_hot_cache
+                        )
+                        if retry is not None:
+                            block_table, reconstructed = retry
                 reconstruct_ms = (time.perf_counter() - reconstruct_started) * 1000.0
                 if block_table.num_tokens < minimum_prefix:
                     reconstructed = None
@@ -11520,6 +11554,41 @@ class Scheduler:
             )
         self._prefix_cache_prepared.add(request.request_id)
 
+    def _restore_shared_system_prefix(
+        self,
+        request: Request,
+        matched_tokens: int,
+        bypass_hot_cache: bool,
+    ) -> tuple[Any, list[Any]] | None:
+        system_end = request.system_prefix_end
+        if not 0 < system_end < matched_tokens:
+            return None
+        self.paged_cache_manager.delete_block_table(request.request_id)
+        block_table, _ = self.block_aware_cache.fetch_cache(
+            request.request_id,
+            request.prompt_token_ids[:system_end],
+            extra_keys=request.vlm_extra_keys_for_cache,
+            extra_key_token_start=request.vlm_extra_key_token_start_for_cache,
+            extra_key_ranges=request.vlm_extra_key_ranges_for_cache,
+            record_stats=False,
+        )
+        if block_table is None:
+            return None
+        reconstructed = self.block_aware_cache.reconstruct_cache(
+            block_table,
+            promote_to_hot_cache=not bypass_hot_cache,
+        )
+        if reconstructed is None:
+            return None
+        logger.info(
+            "Split GDN restore for %s: no recurrent checkpoint on the %d-token "
+            "match; restored the shared system prefix (%d tokens) instead",
+            request.request_id,
+            matched_tokens,
+            block_table.num_tokens,
+        )
+        return block_table, reconstructed
+
     def _record_prefix_cache_result(self, request: Request) -> None:
         """Finalize ordinary prefix metrics after scheduling's fallback guards."""
         pending_tokens = request.pending_prefix_cache_tokens
@@ -11612,6 +11681,7 @@ class Scheduler:
         draft_model_name: str | None = None,
         keep_pct: float | None = None,
         threshold: int | None = None,
+        default_enabled: bool = True,
     ) -> None:
         """Set the draft model for SpecPrefill scoring.
 
@@ -11625,6 +11695,7 @@ class Scheduler:
         self._specprefill_draft_model = draft_model
         self._specprefill_default_keep_pct = keep_pct
         self._specprefill_default_threshold = threshold
+        self._specprefill_default_enabled = default_enabled
         self._draft_prefix_cache = None
         if not draft_model_name:
             logger.info(
@@ -14243,13 +14314,7 @@ class Scheduler:
             # Build per-request state machine for stop tokens
             sm = self._stop_sequences_for_insert(request)
 
-            # Set random seed for reproducible generation (best-effort).
-            # This affects global MLX random state, so concurrent requests
-            # may interfere. Matches OpenAI's best-effort seed semantics.
-            if request.sampling_params.seed is not None and not _request_count(
-                request, "requeued_output_tokens"
-            ):
-                mx.random.seed(request.sampling_params.seed)
+            _start_request_stream(request, self.requests)
 
             # TurboQuant KV is quantized at the end of _do_external_prefill
             # (fp16 prefill → quantize once); _merge_caches() turns the per
@@ -16921,23 +16986,16 @@ class Scheduler:
                 self._fixed_state_measure_armed = arrays_cache_layers > 0
 
                 # Inkling builds its banded relative-position bias as a full
-                # [H, LQ, S] tensor before SDPA; register the transient so
-                # prefill admission prices it (cleared for other models —
-                # the registry is process-wide across model swaps).
-                try:
-                    from .memory_monitor import register_attention_bias_transient
-
-                    model_type = str(getattr(self.model, "model_type", "") or "")
-                    register_attention_bias_transient(
-                        base_dtype_size
-                        if model_type in ("inkling", "inkling_mm_model")
-                        else None
-                    )
-                except Exception:
-                    logger.debug(
-                        "attention-bias transient registration failed",
-                        exc_info=True,
-                    )
+                # [H, LQ, S] tensor before SDPA, Inkling 2 in bounded blocks.
+                model_type = str(getattr(self.model, "model_type", "") or "")
+                mask_elements = None
+                if model_type in INKLING2_MODEL_TYPES:
+                    mask_elements = inkling2_prefill_mask_elements()
+                full_bias = model_type in ("inkling", "inkling_mm_model")
+                self.memory_monitor.set_attention_bias_transient(
+                    base_dtype_size if full_bias or mask_elements else None,
+                    mask_elements,
+                )
                 logger.debug(
                     f"Model info for memory estimation: "
                     f"layers={num_layers} ({num_kv_cache_layers} KVCache, "

@@ -94,13 +94,21 @@ final class ModelSettingsScreenVMTests: XCTestCase {
         XCTAssertEqual(settings["turboquant_kv_enabled"]?.value as? Bool, true)
     }
 
-    func testLightningMtpAdaptiveMaxDepthInWorkingProfile() {
+    func testLightningMtpAdaptiveMaxDepthInWorkingProfile() throws {
         let vm = ModelSettingsScreenVM()
         vm.mtpEnabled = true
-        XCTAssertEqual(vm.currentSettingsDict()[ProfileSettingsKey.mtpAdaptiveMaxDepth]?.value as? Int, 3)
-        XCTAssertEqual(ModelSettingsScreenVM.mtpDepthOptions.map(\.0), ["3", "4", "5", "6"])
+        XCTAssertNil(vm.currentSettingsDict()[ProfileSettingsKey.mtpAdaptiveMaxDepth])
+        XCTAssertEqual(ModelSettingsScreenVM.mtpDepthOptions.map(\.0), ["", "3", "4", "5", "6", "7", "8"])
 
-        for depth in 3...6 {
+        // The model default must send JSON null, not omit the key.
+        var patch = ModelSettingsPatch()
+        patch.mtpAdaptiveMaxDepth = .some(Int(vm.mtpAdaptiveMaxDepth))
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        let object = try JSONSerialization.jsonObject(with: encoder.encode(patch)) as? [String: Any]
+        XCTAssertTrue(object?["mtp_adaptive_max_depth"] is NSNull)
+
+        for depth in 3...8 {
             vm.mtpAdaptiveMaxDepth = String(depth)
             let settings = vm.currentSettingsDict()
             XCTAssertEqual(settings[ProfileSettingsKey.mtpAdaptiveMaxDepth]?.value as? Int, depth)
@@ -860,6 +868,15 @@ final class ModelSettingsScreenVMTests: XCTestCase {
             vm.workingSettingsBody()[ProfileSettingsKey.loraAdapter]?.value as? String,
             "/elsewhere/adapter"
         )
+    }
+
+    func testLoopCDIsSentOnlyForLoopedModels() {
+        let vm = ModelSettingsScreenVM()
+        vm.model = makeModel(id: "m", configModelType: "inkling2")
+        XCTAssertNil(vm.workingSettingsBody()[ProfileSettingsKey.loopcdEnabled])
+        vm.model = makeModel(id: "m", configModelType: "inkling2_loop")
+        vm.loopcdEnabled = true
+        XCTAssertEqual(vm.workingSettingsBody()[ProfileSettingsKey.loopcdEnabled]?.value as? Bool, true)
     }
 
     func testGPUPowerLimitSendsZeroWhenOff() throws {
