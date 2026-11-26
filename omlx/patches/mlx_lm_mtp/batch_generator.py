@@ -3105,6 +3105,22 @@ def _dspark_host(model: Any) -> Optional[Any]:
     return None
 
 
+def _dspark_prepare_block(host: Any) -> Optional[Any]:
+    """The host's draft-block prefetch, unless the target reads packed GGUF weights.
+
+    A GGUF verify keeps the GPU busy; prefetching the next draft block on the same
+    device measured slower single-stream decode than drafting after the commit.
+    """
+    if host is None:
+        return None
+    layers = getattr(host, "layers", None) or getattr(host, "pipeline_layers", ())
+    first = layers[0] if layers else None
+    projection = getattr(getattr(first, "attn", None), "wq_a", None)
+    if getattr(projection, "mode", None) == "gguf":
+        return None
+    return getattr(host, "dspark_prepare_block", None)
+
+
 def _dspark_draft_depth(host, state, depth=None):
     if depth is None:
         depth = state.controller.cur if state.controller is not None else state.depth
@@ -4705,7 +4721,7 @@ def _run_verify_cycle_chain(
         and gdn_states is None
     ):
         dspark = _dspark_host(gen_batch.model)
-        prepare_block = getattr(dspark, "dspark_prepare_block", None)
+        prepare_block = _dspark_prepare_block(dspark)
 
     if k == 0:
         # Depth-0 cycle (controller escape hatch): the forward above was a

@@ -638,6 +638,147 @@ def test_gguf_fused_block_and_mtp_verify_match_unfused(
     np.testing.assert_allclose(actual_pre, expected_pre, atol=1e-5, rtol=1e-4)
 
 
+@pytest.mark.parametrize("ratio", [0, 2])
+@pytest.mark.parametrize("exact", [False, True])
+def test_gguf_batched_decode_matches_single_requests(monkeypatch, ratio, exact):
+    """A GGUF decode batch with full windows takes the request-batched indexer and
+    split attention, and every request keeps the logits it decodes alone."""
+    from test_deepseek_v41_fused_decode import build
+
+    from omlx.patches.deepseek_v41 import decode_fused
+    from omlx.patches.deepseek_v41.cache import DeepseekV41Cache
+
+    model = build(
+        n_layers=1,
+        compress_ratios=(ratio,),
+        kv_source_layers=(0,) if ratio else (),
+        index_source_layers=(0,) if ratio else (),
+        candidate_source_layer=-1,
+    )
+    c, blk = model._config, model.layers[0]
+    object.__setattr__(blk, "_omlx_verify_exact", exact)
+    for n in ("wq_a", "wkv", "wq_b", "wo_b"):
+        setattr(blk.attn, n, gguf_module(getattr(blk.attn, n), 8, 11))
+    for n, qt in zip(("w1", "w3", "w2"), (19, 16, 22)):
+        setattr(
+            blk.ffn.experts, n, gguf_module(getattr(blk.ffn.experts, n), qt, 71 + qt)
+        )
+        setattr(
+            blk.ffn.shared_experts,
+            n,
+            gguf_module(getattr(blk.ffn.shared_experts, n), 8, 77 + qt),
+        )
+    assert decode_fused.supported(blk, c)
+
+    real = decode_fused.batched_attention
+    batched = []
+
+    def counted(*args, **kwargs):
+        out = real(*args, **kwargs)
+        batched.append(out is not None)
+        return out
+
+    monkeypatch.setattr(decode_fused, "batched_attention", counted)
+    batch = 3
+    rng = np.random.default_rng(23)
+    prompts = [rng.integers(3, 60, c.window_size + 4).tolist() for _ in range(batch)]
+    singles, rows = [], []
+    for prompt in prompts:
+        for target in (singles, rows):
+            cache = model.make_cache()
+            mx.eval(model(mx.array([prompt[:-1]]), cache=cache))
+            target.append(cache)
+    merged = [
+        DeepseekV41Cache.merge([rows[r][i] for r in range(batch)])
+        for i in range(len(rows[0]))
+    ]
+    for item in merged:
+        item.prepare(lengths=[4] * batch)
+    tokens = [prompt[-1] for prompt in prompts]
+    expected = [
+        np.asarray(model(mx.array([[t]]), cache=cache)[0, -1].astype(mx.float32))
+        for t, cache in zip(tokens, singles)
+    ]
+    got = np.asarray(
+        model(mx.array([[t] for t in tokens]), cache=merged)[:, -1].astype(mx.float32)
+    )
+    for r in range(batch):
+        np.testing.assert_allclose(
+            got[r], expected[r], rtol=0, atol=1e-6 * np.abs(expected[r]).max()
+        )
+    assert batched == [True]
+
+
+@pytest.mark.parametrize("ratio", [0, 2])
+@pytest.mark.parametrize("exact", [False, True])
+def test_gguf_batched_verify_matches_single_requests(monkeypatch, ratio, exact):
+    """Full-window GGUF verify blocks from several requests share one split attention
+    and still match each request's own verify block."""
+    from test_deepseek_v41_fused_decode import build
+
+    from omlx.patches.deepseek_v41 import decode_fused
+
+    model = build(
+        n_layers=1,
+        compress_ratios=(ratio,),
+        kv_source_layers=(0,) if ratio else (),
+        index_source_layers=(0,) if ratio else (),
+        candidate_source_layer=-1,
+    )
+    c, blk = model._config, model.layers[0]
+    object.__setattr__(blk, "_omlx_verify_exact", exact)
+    for n in ("wq_a", "wkv", "wq_b", "wo_b"):
+        setattr(blk.attn, n, gguf_module(getattr(blk.attn, n), 8, 11))
+    for n, qt in zip(("w1", "w3", "w2"), (19, 16, 22)):
+        setattr(
+            blk.ffn.experts, n, gguf_module(getattr(blk.ffn.experts, n), qt, 71 + qt)
+        )
+        setattr(
+            blk.ffn.shared_experts,
+            n,
+            gguf_module(getattr(blk.ffn.shared_experts, n), 8, 77 + qt),
+        )
+    assert decode_fused.supported(blk, c)
+
+    batch, rows = 2, 3
+    prompt = [3, 4, 5, 6, 7, 8]
+    singles, batched_caches = [], []
+    for _ in range(batch):
+        for target in (singles, batched_caches):
+            cache = model.make_cache()
+            mx.eval(model(mx.array([prompt]), cache=cache))
+            target.append(cache[0])
+    start = singles[0].size()
+    assert start >= c.window_size
+    mx.random.seed(91)
+    h = mx.random.normal((batch, rows, c.hc_mult, c.dim)).astype(mx.bfloat16)
+    pre = mx.ones((batch, rows, c.hc_mult), mx.float32)
+    expected = [
+        decode_fused.decode_block_verify(
+            blk, h[b : b + 1], pre[b : b + 1], singles[b], {}, start, c
+        )
+        for b in range(batch)
+    ]
+    expected_h = mx.concatenate([v[0] for v in expected])
+    expected_pre = mx.concatenate([v[1] for v in expected])
+    mx.eval(expected_h, expected_pre)
+
+    real = decode_fused.window_attention_bq
+    shapes = []
+
+    def counted(*args, **kwargs):
+        shapes.append(args[1].shape[0])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(decode_fused, "window_attention_bq", counted)
+    actual_h, actual_pre = decode_fused.decode_block_verify_nb(
+        blk, h, pre, batched_caches, [{} for _ in range(batch)], [start] * batch, c
+    )
+    np.testing.assert_array_equal(actual_h.astype(mx.float32), expected_h.astype(mx.float32))
+    np.testing.assert_array_equal(actual_pre, expected_pre)
+    assert shapes == [batch * rows]
+
+
 @pytest.mark.parametrize("qtype", [8, 14])
 def test_gguf_verify_projection_reuses_weights_without_changing_rows(qtype):
     raw, rng = packed(qtype, (8192, 512), 381 + qtype)

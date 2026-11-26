@@ -998,23 +998,55 @@ def _gguf_block(blk, h, pre, caches, shareds, starts, c):
         cos, sin = _cos_sin_nb(c, bool(ratio), positions)
         qr, qrq, packed = attn_mid_nb(att, qa, kv_in, cos, sin, c, quantize_query=False)
         q = wqb_rope_nb(att, qrq, cos, sin, c, tiles)
-        outputs = []
-        for b in range(bn):
-            sl = slice(b * rn, (b + 1) * rn)
-            if rn == 1:
-                outputs.append(attention_core(
-                    att, x[sl].reshape(-1), qr[sl].reshape(-1), q[sl].reshape(-1),
-                    packed[sl].reshape(-1), caches[b], shareds[b], starts[b],
-                    cos[sl].reshape(-1), sin[sl].reshape(-1), c,
-                )[None])
-            else:
-                outputs.append(_verify_attention(
+        if bn > 1 and rn == 1:
+            # A decode batch whose windows are full shares one indexer pass and one
+            # split attention over the request axis.
+            oq = batched_attention(
+                att, q, packed, x, qr, caches, shareds, starts, cos, sin, c
+            )
+            if oq is None:   # a request still filling its window: per-request attention
+                oq = mx.concatenate([
+                    attention_core(
+                        att, x[b].reshape(-1), qr[b].reshape(-1), q[b].reshape(-1),
+                        packed[b].reshape(-1), caches[b], shareds[b], starts[b],
+                        cos[b].reshape(-1), sin[b].reshape(-1), c,
+                    )[None]
+                    for b in range(bn)
+                ])
+        elif bn > 1:
+            # Verify blocks of several requests share one split attention when every
+            # window is full, as decode_block_verify_nb does.
+            spans = [slice(b * rn, (b + 1) * rn) for b in range(bn)]
+            prepared = [
+                _verify_prepare(
                     att, x[sl], qr[sl], q[sl], packed[sl], cos[sl], sin[sl],
                     caches[b], shareds[b], starts[b], c,
-                ))
+                )
+                for b, sl in enumerate(spans)
+            ]
+            if all(p[0] == "bq" for p in prepared):
+                win = mx.concatenate([p[1] for p in prepared], 0)
+                parts = None if prepared[0][2] is None else [part for p in prepared for part in p[2]]
+                memo = shareds[0].setdefault("_verify_batch", {})
+                oq = window_attention_bq(att, q, win, parts, memo, cos, sin, c)
+            else:
+                oq = mx.concatenate([
+                    p[1] if p[0] == "done" else window_attention_bq(att, q[sl], p[1], p[2], p[3], cos[sl], sin[sl], c)
+                    for p, sl in zip(prepared, spans)
+                ])
+        elif rn == 1:
+            oq = attention_core(
+                att, x.reshape(-1), qr.reshape(-1), q.reshape(-1),
+                packed.reshape(-1), caches[0], shareds[0], starts[0],
+                cos.reshape(-1), sin.reshape(-1), c,
+            )[None]
+        else:
+            oq = _verify_attention(
+                att, x, qr, q, packed, cos, sin, caches[0], shareds[0], starts[0], c,
+            )
         # Attention's output quantization is unchanged. GGUF wo_a remains the
         # original BF16 tensor; the following wo_b input is not FP8-rounded.
-        grouped = mx.concatenate(outputs).astype(mx.bfloat16).reshape(bn, rn, c.o_groups, -1)
+        grouped = oq.astype(mx.bfloat16).reshape(bn, rn, c.o_groups, -1)
         weight = att.wo_a.weight.reshape(c.o_groups, c.o_lora_rank, -1)
         latent = mx.einsum("bsgd,grd->bsgr", grouped, weight).reshape(bn * rn, -1)
         attn = gemv_fp8_nb(latent, att.wo_b, mma=tiles)[0]
