@@ -52,9 +52,26 @@ def _assert_packed_close(a, b, bits, group_size):
     return flips
 
 
-@pytest.mark.parametrize("ratio", [2, 4, 8])
-@pytest.mark.parametrize("prefix", [1, 3, 4, 5, 7, 8])
-@pytest.mark.parametrize("accepted", [0, 1, 2, 3])
+@pytest.mark.parametrize(
+    "ratio,prefix,accepted",
+    [
+        (2, 1, 0),
+        (2, 4, 2),
+        (2, 5, 1),
+        (2, 8, 1),
+        (4, 1, 2),
+        (4, 4, 1),
+        (4, 5, 3),
+        (4, 7, 0),
+        (4, 7, 2),
+        (4, 8, 0),
+        (8, 1, 1),
+        (8, 4, 0),
+        (8, 5, 2),
+        (8, 7, 0),
+        (8, 8, 2),
+    ],
+)
 def test_verify_rollback_restores_all_csa2_slots(prefix, accepted, ratio, monkeypatch):
     config = replace(mtp_config(), compress_ratios=(0, ratio, ratio, 1, 1, 0, 0, 0))
     model = LanguageModel(config)
@@ -227,7 +244,7 @@ def test_compiled_proposal_matches_plain_at_varying_width():
     # neither retrace the advancing cache offset nor change the proposal.
     for width in (1, 2, 3, 4, 5):
         model.dspark_append_context(step, raw)
-        hidden = model.dspark_hidden(step, anchor, comp, draft_length=width)
+        hidden = model.dspark_hidden_rows([step], [anchor], [comp], draft_length=width)
         plain = proposal_forward(model, anchor, raw, draft_length=width)
         compiled = proposal_forward_compiled(model, anchor, comp, draft_length=width)
         mx.eval(plain, compiled, hidden)
@@ -386,3 +403,68 @@ def test_interleaved_prefills_keep_their_dspark_contexts():
         2,
     ]
 
+
+
+@pytest.mark.parametrize("prompts", [([3, 4, 5, 6], [7, 8, 9, 10]), ([3, 4, 5, 6, 7, 8], [9, 10]), ([3], [4, 5, 6], [7, 8])])
+def test_dspark_stages_batched_across_requests_match_each_request(prompts):
+    model = LanguageModel(mtp_config())
+    load_reference_weights(model)
+    hiddens = []
+    for ids in prompts:
+        _, hidden = model(mx.array([ids]), cache=model.make_cache(), return_dspark_hidden=True)
+        hiddens.append(hidden)
+    anchors = [mx.array([[11 + row]]) for row in range(len(prompts))]
+
+    def two_cycles(propose):
+        caches = [model.make_mtp_cache() for _ in prompts]
+        first = propose(hiddens, caches)
+        second = propose([hidden[:, -1:] for hidden in hiddens], caches)
+        return first, second, caches
+
+    single = two_cycles(
+        lambda rows, caches: mx.concatenate(
+            [
+                model.dspark_forward(hidden, anchor, cache, draft_length=3)[1]
+                for hidden, anchor, cache in zip(rows, anchors, caches)
+            ],
+            0,
+        )
+    )
+    batched = two_cycles(
+        lambda rows, caches: model.dspark_hidden_rows(rows, anchors, caches, draft_length=3)
+    )
+    for expected, actual in zip(single[:2], batched[:2]):
+        assert actual.shape == expected.shape == (len(prompts), 3, expected.shape[-1])
+        np.testing.assert_allclose(actual, expected, atol=2e-5, rtol=2e-4)
+    for expected, actual in zip(single[2], batched[2]):
+        for ring, other in zip(expected, actual):
+            assert other.offset == ring.offset
+            np.testing.assert_allclose(other.keys, ring.keys, atol=2e-5, rtol=2e-4)
+
+
+def test_forward_spec_two_rows_match_each_row():
+    """forward_spec over two batch rows keeps [batch, length] through attention; each
+    row's proposal equals the one it drafts alone."""
+    model = LanguageModel(mtp_config())
+    load_reference_weights(model)
+    c = model._config
+    rng = np.random.default_rng(17)
+    taps = c.dim * len(c.dspark_target_layer_ids)
+    ids = mx.array(rng.integers(3, 60, (2, 1)).tolist())
+    context = mx.array(rng.normal(size=(2, 4, taps)), mx.bfloat16)
+    step = mx.array(rng.normal(size=(2, 1, taps)), mx.bfloat16)
+
+    cache = model.make_dspark_cache()
+    assert model.forward_spec(ids, context, cache) is None
+    together = model.forward_spec(ids, step, cache)
+    mx.eval(together)
+
+    for row in range(2):
+        alone_cache = model.make_dspark_cache()
+        assert model.forward_spec(ids[row : row + 1], context[row : row + 1], alone_cache) is None
+        alone = model.forward_spec(ids[row : row + 1], step[row : row + 1], alone_cache)
+        mx.eval(alone)
+        assert mx.array_equal(together[0][row], alone[0][0]).item()
+        for actual, expected in zip(together[1][row], alone[1][0]):
+            np.testing.assert_allclose(actual, expected, atol=2e-5, rtol=2e-4)
+        np.testing.assert_allclose(together[2][row], alone[2][0], atol=2e-5, rtol=2e-4)

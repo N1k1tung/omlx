@@ -166,6 +166,8 @@ struct ModelSettingsDTO: Codable, Equatable, Sendable {
     var guidedGrammar: String? = nil
     var moeExpertOffloadEnabled: Bool? = nil
     var moeExpertOffloadResidentFraction: Double? = nil
+    var loopcdEnabled: Bool? = nil
+    var loopcdSkipThinking: Bool? = nil
     // Experimental: TurboQuant KV cache
     let turboquantKvEnabled: Bool?
     let turboquantKvScheme: String?
@@ -300,7 +302,7 @@ struct ModelSettingsPatch: Encodable, Equatable, Sendable {
     var dflashVerifyMode: String? = nil
     // Experimental: native MTP
     var mtpEnabled: Bool? = nil
-    var mtpAdaptiveMaxDepth: Int? = nil
+    var mtpAdaptiveMaxDepth: Int?? = nil // .some(nil) sends JSON null (model default).
     var mtpFixedDepth: Int?? = nil // .some(nil) sends JSON null (adaptive).
     // Experimental: VLM MTP
     var vlmMtpEnabled: Bool? = nil
