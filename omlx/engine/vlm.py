@@ -2298,6 +2298,18 @@ class VLMBatchedEngine(BaseEngine):
             except Exception:
                 logger.debug("MoE gate+up fusion not applied", exc_info=True)
 
+        if self.model_type == "ernie5_5_moe":
+            try:
+                from ..patches.ernie55_sinkhorn import apply_ernie55_sinkhorn_patch
+
+                await loop.run_in_executor(
+                    get_mlx_executor(),
+                    apply_ernie55_sinkhorn_patch,
+                    self._vlm_model,
+                )
+            except Exception:
+                logger.debug("ERNIE 5.5 fused sinkhorn not applied", exc_info=True)
+
         # Qwen ANE prefill compiles its slices from the stock QuantizedLinear
         # layout, so build them before the packed projections replace it. The
         # class hooks are installed later, outside the other Qwen class patches.
