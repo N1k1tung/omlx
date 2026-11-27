@@ -8,6 +8,7 @@ from statistics import median
 # (expected tokens per ms) park at once instead of after 16 losing ones.
 _CLEAR_LOSS = 0.9
 _PRIOR = 0.8
+_SINGLETON_PRIOR = 0.6
 
 
 class BatchPolicy:
@@ -29,7 +30,8 @@ class BatchPolicy:
         self.standard = deque(maxlen=8)
         self.standard_warmup = 2
         self.costs = {}
-        self.acceptance = [_PRIOR] * self.max_depth
+        prior = _SINGLETON_PRIOR if len(self.uids) == 1 else _PRIOR
+        self.acceptance = [prior] * self.max_depth
         self.reached = [0] * self.max_depth
         self.losing = 0
         self.clear_losing = 0
@@ -76,7 +78,8 @@ class BatchPolicy:
             if not self.remaining:
                 self.costs.clear()
                 self.last_seen.clear()
-                self.acceptance = [_PRIOR] * self.max_depth
+                prior = _SINGLETON_PRIOR if len(self.uids) == 1 else _PRIOR
+                self.acceptance = [prior] * self.max_depth
                 self.reached = [0] * self.max_depth
                 self.cur = self.max_depth
                 self.losing = 0
@@ -100,7 +103,11 @@ class BatchPolicy:
                 break
             rate = sum(count > position for count in accepted) / reached
             self.reached[position] += 1
-            weight = max(0.08, 1.0 / (self.reached[position] + 1))
+            weight = (
+                0.08
+                if len(self.uids) == 1
+                else max(0.08, 1.0 / (self.reached[position] + 1))
+            )
             self.acceptance[position] += weight * (rate - self.acceptance[position])
         if milliseconds is None or self.fixed:
             return

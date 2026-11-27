@@ -206,7 +206,9 @@ def apply() -> bool:
                     # singleton back to the standard step at the drained-queue
                     # boundary so the late join merges this very call (#2515).
                     handed_off = _handoff_mtp_for_late_join(self, self._omlx_mtp_state)
-                if not handed_off and not first_sent:
+                # DSpark's early first token costs a full decode step; keep its
+                # steady-state TG instead.
+                if not handed_off and not first_sent and _dspark_host(self.model) is None:
                     first = _emit_first_token(self)
                     if first is not None:
                         return first
@@ -1911,8 +1913,13 @@ def _mtp_module(lang):
 
 
 def _drafts_before_commit(model) -> bool:
-    forward = getattr(type(_mtp_language_model(model)), "mtp_forward", None)
-    return bool(getattr(forward, "_omlx_head_cache_only", False))
+    language = _mtp_language_model(model)
+    forward = getattr(type(language), "mtp_forward", None)
+    if getattr(forward, "_omlx_head_cache_only", False):
+        return True
+    # DSpark drafts read the head's own context, not the target cache, so they
+    # can run while the host rolls the target cache back.
+    return bool(getattr(language, "_omlx_dspark_decode_enabled", False))
 
 
 def _chain_tail_caches(model, mtp_cache):

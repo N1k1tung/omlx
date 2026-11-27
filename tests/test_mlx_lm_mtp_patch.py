@@ -5396,6 +5396,20 @@ def test_batch_policy_skips_copied_windows(monkeypatch):
         mlx_lm_mtp.set_mtp_active(previous)
 
 
+def test_batch_policy_keeps_the_legacy_prior_for_one_row():
+    from omlx.patches.mlx_lm_mtp.batch_policy import BatchPolicy
+
+    single = BatchPolicy(["u"], 5)
+    assert single.acceptance == [0.6] * 5
+    batch = BatchPolicy(["a", "b"], 5)
+    assert batch.acceptance == [0.8] * 5
+
+    single.observe_mtp(1, [1], 1.0, stable=True)
+    assert single.acceptance[0] == pytest.approx(0.6 + 0.08 * (1 - 0.6))
+    batch.observe_mtp(1, [1], 1.0, stable=True)
+    assert batch.acceptance[0] == pytest.approx(0.8 + 0.5 * (1 - 0.8))
+
+
 @pytest.mark.parametrize("family, width", [("qwen4", 15), ("glm5", 7)])
 def test_context_copy_width_follows_the_targets_verify_window(family, width):
     """A verbatim run after a whole accept copies 15 tokens only for a target
