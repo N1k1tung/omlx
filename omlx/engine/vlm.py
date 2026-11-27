@@ -2100,7 +2100,7 @@ class VLMBatchedEngine(BaseEngine):
                             self._model_settings, "moe_expert_offload_enabled", False
                         ),
                     )
-                if model_type == COHERE2_MOE_MODEL_TYPE:
+                if model_type in (COHERE2_MOE_MODEL_TYPE, "ernie5_5_moe"):
                     return _load_text_model_with_tokenizer_fallback(
                         self._model_name,
                         trust_remote_code=self._trust_remote_code,
@@ -4130,6 +4130,14 @@ class VLMBatchedEngine(BaseEngine):
             raise InvalidRequestError(
                 "Cohere2 MoE is a text-only model and does not support "
                 "image or audio input.",
+                field="messages",
+            )
+        if model_type == "ernie5_5_moe" and (
+            num_images or num_audios or num_videos
+        ):
+            raise InvalidRequestError(
+                "ERNIE 5.5 Flash is a text-only model and does not support "
+                "image, audio, or video input.",
                 field="messages",
             )
         if model_type == QWEN4_EXP_MODEL_TYPE and num_audios > 0:

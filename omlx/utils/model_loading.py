@@ -965,6 +965,17 @@ def maybe_apply_pre_load_patches(
                 model_name,
             )
 
+    if for_vlm and model_type == "ernie5_5_moe":
+        from ..patches.mlx_vlm_ernie5_5_preview import (
+            apply_mlx_vlm_ernie5_5_preview_patch,
+        )
+
+        if apply_mlx_vlm_ernie5_5_preview_patch():
+            logger.info(
+                "ERNIE 5.5 Flash Preview weight patch applied for %s",
+                model_name,
+            )
+
     if for_vlm and model_type == "qwen4_exp":
         from ..patches.mlx_vlm_qwen4_exp_compat import (
             apply_mlx_vlm_qwen4_exp_compat_patch,
