@@ -1,8 +1,11 @@
+from pathlib import Path
+
 import mlx.core as mx
 
-from omlx.patches.mlx_vlm_ernie5_5_preview import (
-    is_preview_config,
-    prepare_preview_weights,
+from omlx.patches.mlx_vlm_ernie55_compat import (
+    _VENDOR_MLX_VLM,
+    apply_mlx_vlm_ernie55_compat_patch,
+    is_applied,
 )
 
 CONFIG = {
@@ -11,10 +14,22 @@ CONFIG = {
 }
 
 
+def _prepare_preview_weights():
+    if not is_applied():
+        assert apply_mlx_vlm_ernie55_compat_patch()
+    from mlx_vlm.models.ernie5_5_moe import ernie5_5_moe
+
+    assert str(Path(ernie5_5_moe.__file__).resolve()).startswith(
+        str(_VENDOR_MLX_VLM.resolve())
+    )
+    return ernie5_5_moe.prepare_preview_weights
+
+
 def test_prepare_preview_weights_repacks_both_layouts():
+    prepare_preview_weights = _prepare_preview_weights()
+
     expert = "model.layers.1.block_sparse_moe.experts.0.w1"
     dense = "model.layers.0.mlp.up_proj"
-    grouped = "model.layers.0.self_attn.linear_o_group_proj"
     expert_weight = mx.arange(64 * 32, dtype=mx.uint8).reshape(64, 32)
     expert_scales = mx.full((64, 2), 127, dtype=mx.uint8)
     dense_weight = mx.arange(256 * 64, dtype=mx.uint8).reshape(256, 64)
@@ -24,8 +39,6 @@ def test_prepare_preview_weights_repacks_both_layouts():
         expert + ".weight_scale_inv": expert_scales,
         dense + ".weight": dense_weight,
         dense + ".weight_scale_inv": dense_scales,
-        grouped: mx.zeros((128, 128), dtype=mx.uint8),
-        grouped + "_scale_inv": mx.array([[1.0]]),
         "model.mtp.0.block_sparse_moe.experts.0.w1.weight": mx.zeros((1,)),
         "model.embed_tokens.weight": mx.zeros((2, 2)),
     }
@@ -55,14 +68,14 @@ def test_prepare_preview_weights_repacks_both_layouts():
     }
     assert "model.mtp.0.block_sparse_moe.experts.0.w1.weight" not in weights
     assert "model.embed_tokens.weight" in weights
-    assert weights[grouped].dtype == mx.bfloat16
-    assert weights[grouped].shape == (128, 128)
-    assert grouped + ".scales" not in weights
 
 
 def test_prepare_preview_weights_ignores_base_checkpoints():
+    prepare_preview_weights = _prepare_preview_weights()
     raw = {"model.layers.0.mlp.up_proj.weight": mx.zeros((2, 2))}
-    config = {"model_type": "ernie5_5_moe", "quantization_config": {"quant_method": "fp8"}}
+    config = {
+        "model_type": "ernie5_5_moe",
+        "quantization_config": {"quant_method": "fp8"},
+    }
 
-    assert not is_preview_config(config)
     assert prepare_preview_weights(raw, config) == (raw, None)

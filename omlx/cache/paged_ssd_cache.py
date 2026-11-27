@@ -374,8 +374,9 @@ _NUMERICS_REVISIONS = {
     "mlx_vlm.models.mage_vl.vision": "mlx-vlm-36494b4",
     # oMLX's Muse Glimmer swaps the position grid axes of non-square images.
     "mlx_vlm.models.muse_glimmer.vision": "glimmer-position-xy-1",
-    # oMLX's ERNIE 5.5 sinkhorn patch sums the mHC mixer rows in another order.
-    "mlx_vlm.models.ernie5_5_moe.language": "ernie55-sinkhorn-1",
+    # oMLX's vendored ERNIE 5.5 tree runs fused decode kernels whose rounding
+    # differs from the composed path (mixer rows summed in another order).
+    "mlx_vlm.models.ernie5_5_moe.language": "ernie55-fused-decode-1",
     # Hy4 Flash blocks stored after a restore before #5534 hold wrong ranges.
     "omlx.patches.hy_v4.flash": "hy4-flash-ranges-1",
 }
