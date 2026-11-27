@@ -3035,6 +3035,29 @@ class TestPrefixCacheCacheList:
 
         assert prefix_cache._get_cache_seq_len(cache_data) == 2048
 
+    def test_get_cache_seq_len_later_cache_list_layer_wins(self, prefix_cache, mx):
+        """ERNIE: restore, append, restore keeps the later MLA layer's length."""
+        window_keys = mx.zeros((1, 8, 128, 64))
+        pooled = mx.zeros((1, 16, 512))
+
+        def cache_data(full_tokens):
+            full_keys = mx.zeros((1, 1, full_tokens, 64))
+            return [
+                {
+                    "state": [(window_keys, window_keys), (pooled, None, pooled)],
+                    "cache_type": "CacheList",
+                    "class_name": "CacheList",
+                },
+                {
+                    "state": [(full_keys, full_keys)],
+                    "cache_type": "CacheList",
+                    "class_name": "CacheList",
+                },
+            ]
+
+        assert prefix_cache._get_cache_seq_len(cache_data(2048)) == 2048
+        assert prefix_cache._get_cache_seq_len(cache_data(2112)) == 2112
+
     def test_extract_block_tensor_slice_cache_list_last_block(self, prefix_cache, mx):
         """Test _extract_block_tensor_slice for CacheList on last block."""
         from omlx.cache.hybrid_cache import ModelCacheConfig

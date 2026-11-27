@@ -1,8 +1,9 @@
 from types import SimpleNamespace
 
 import mlx.core as mx
+import pytest
 
-from omlx.patches.ernie55_sinkhorn import apply_ernie55_sinkhorn_patch
+from omlx.patches import ernie55_sinkhorn
 
 
 def _hyper_connection():
@@ -15,11 +16,23 @@ def _hyper_connection():
     module.fn = mx.random.normal((24, 32)).astype(mx.float32)
     module.base = mx.random.normal((24,)).astype(mx.float32)
     module.scale = mx.array([1.0, 2.0, 0.5])
+    module.eval()
     return module
 
 
-def test_fused_sinkhorn_keeps_the_collapsed_residual():
+def test_fused_sinkhorn_runs_the_metal_kernel(monkeypatch):
+    from mlx_vlm.models.deepseek_v4 import hyper_connection
     from mlx_vlm.models.deepseek_v4.hyper_connection import _hc_ops
+
+    dispatched = []
+    metal_kernel = hyper_connection._hc_kernel
+
+    def spy(*args, **kwargs):
+        dispatched.append(1)
+        return metal_kernel(*args, **kwargs)
+
+    monkeypatch.setattr(hyper_connection, "_hc_kernel", spy)
+    monkeypatch.setattr(ernie55_sinkhorn, "_APPLIED", False)
 
     module = _hyper_connection()
     x = mx.random.normal((1, 1, 4, 8)).astype(mx.bfloat16)
@@ -38,9 +51,12 @@ def test_fused_sinkhorn_keeps_the_collapsed_residual():
         module.eps,
     )
 
-    assert apply_ernie55_sinkhorn_patch(SimpleNamespace(model_type="ernie5_5_moe"))
+    assert ernie55_sinkhorn.apply_ernie55_sinkhorn_patch(
+        SimpleNamespace(model_type="ernie5_5_moe")
+    )
     collapsed, post, comb = module(x)
 
+    assert dispatched, "the fused sinkhorn kernel was not dispatched"
     assert mx.array_equal(collapsed, reference[0]).item()
     assert mx.max(mx.abs(post - reference[1])).item() <= 1e-6
     assert mx.max(mx.abs(comb - reference[2])).item() <= 1e-6

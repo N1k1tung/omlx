@@ -2128,19 +2128,24 @@ class BlockAwarePrefixCache(CacheManager):
         # Step 3: CacheList fallback — check sub-states for seq_len
         # This handles all-CacheList models (e.g., deepseek_v32) and Hy4 Flash,
         # whose CacheList layers hold the whole sequence next to a window.
+        # Every layer is consulted: a hybrid model can keep its full sequence
+        # in later MLA layers while the first CacheList only holds a window.
+        cache_list_seq_len = 0
         for layer_state in cache_data:
             if (
                 layer_state.get("cache_type") == "CacheList"
                 or layer_state.get("class_name") == "CacheList"
             ):
-                sub_states = layer_state.get("state", [])
-                for sub_state in sub_states:
+                for sub_state in layer_state.get("state", []):
                     if isinstance(sub_state, (list, tuple)) and len(sub_state) >= 2:
                         sub_keys = sub_state[0]
                         if hasattr(sub_keys, "shape") and len(sub_keys.shape) == 4:
-                            seq_len = sub_keys.shape[2]
-                            logger.debug(f"Using CacheList sub-cache seq_len={seq_len}")
-                            return max(seq_len, max_seq_len)
+                            cache_list_seq_len = max(
+                                cache_list_seq_len, sub_keys.shape[2]
+                            )
+        if cache_list_seq_len > max_seq_len:
+            logger.debug(f"Using CacheList sub-cache seq_len={cache_list_seq_len}")
+            return cache_list_seq_len
 
         if max_seq_len > 0:
             # Normal result for all-non-sliceable-KVCache models

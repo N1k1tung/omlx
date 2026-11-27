@@ -200,6 +200,12 @@ def apply_mlx_vlm_ernie5_5_preview_patch() -> bool:
     except ImportError:
         return False
 
+    from omlx.patches.deepseek_v4 import apply_pooling_cache_support
+
+    # The HCA layers keep their compressed KV in mlx-vlm's PoolingCache, so the
+    # prefix / SSD cache needs that handler registered before the first request.
+    apply_pooling_cache_support()
+
     if not getattr(fp8.transform_fp8_weights, "_omlx_ernie55_preview", False):
         original_transform = fp8.transform_fp8_weights
 
