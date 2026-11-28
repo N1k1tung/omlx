@@ -4700,13 +4700,25 @@ class EnginePool:
 
             # VLM MTP: load MTP drafter (gemma4_assistant or qwen3_5_mtp) and attach to engine.
             # Fail-soft -- drafter load issues never block the target engine.
+            # A checkpoint that bundles its block drafter (ERNIE 5.5 Flash
+            # Preview's DSpark head) is its own draft model.
+            bundled_draft = None
+            if model_settings is not None and getattr(
+                model_settings, "vlm_mtp_enabled", False
+            ):
+                from .speculative.vlm_mtp import bundled_block_drafter_path
+
+                bundled_draft = bundled_block_drafter_path(entry.model_path)
             if (
                 model_settings is not None
                 and getattr(model_settings, "vlm_mtp_enabled", False)
-                and getattr(model_settings, "vlm_mtp_draft_model", None)
+                and (
+                    getattr(model_settings, "vlm_mtp_draft_model", None)
+                    or bundled_draft
+                )
                 and hasattr(engine, "set_vlm_mtp_drafter")
             ):
-                drafter_id = model_settings.vlm_mtp_draft_model
+                drafter_id = model_settings.vlm_mtp_draft_model or bundled_draft
                 drafter_entry = self._entries.get(drafter_id)
                 drafter_path = drafter_entry.model_path if drafter_entry else drafter_id
 

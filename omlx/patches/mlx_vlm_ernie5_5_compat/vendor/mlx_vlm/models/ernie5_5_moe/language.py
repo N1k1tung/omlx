@@ -487,6 +487,34 @@ class HCAAttention(CompressedAttention):
         self.vha = VirtualHeads(self.n_heads, config.vha_rank)
 
     def __call__(self, x, cache=None):
+        qr, q, kv = self._queries(x)
+        return self._project(self._attend(x, q, kv, cache), qr)
+
+    def rows(self, x, caches, bounds):
+        """Several requests' blocks, laid end to end in ``x`` (1, N, D).
+
+        ``bounds[r]`` is the ``(start, end)`` of request ``r``'s rows and
+        ``caches[r]`` its own layer cache. The projections on either side of
+        the attention are token-wise and read their weights once for all the
+        rows; each request attends over its own keys.
+        """
+        qr, q, kv = self._queries(x)
+        out = [
+            self._attend(x[:, s:e], q[:, s:e], kv[:, s:e], cache)
+            for cache, (s, e) in zip(caches, bounds)
+        ]
+        return self._project(mx.concatenate(out, axis=1), qr)
+
+    def _queries(self, x):
+        """The projections that need no position: ``(qr, q, kv)``."""
+        B, L, _ = x.shape
+        qr = self.q_norm(_linear(self.wq_a, x))
+        q = _linear(self.wq_b, qr).reshape(B, L, self.n_heads, self.head_dim)
+        q = mx.fast.rms_norm(q, None, self.config.rms_norm_eps)
+        return qr, q, self.kv_norm(_linear(self.wkv, x))
+
+    def _attend(self, x, q, kv, cache=None):
+        """One request's rows over its own cache: (B, L, heads, head_dim)."""
         B, L, _ = x.shape
         local = cache[0] if cache is not None else None
         pool = cache[1] if cache is not None else None
@@ -495,11 +523,8 @@ class HCAAttention(CompressedAttention):
         mask = create_attention_mask(
             x, local, window_size=self.config.sliding_window, return_array=True
         )
-        qr = self.q_norm(_linear(self.wq_a, x))
-        q = _linear(self.wq_b, qr).reshape(B, L, self.n_heads, self.head_dim)
-        q = mx.fast.rms_norm(q, None, self.config.rms_norm_eps).transpose(0, 2, 1, 3)
-        q = self.rope(q, offset)
-        kv = self.rope(self.kv_norm(_linear(self.wkv, x))[:, None], offset)
+        q = self.rope(q.transpose(0, 2, 1, 3), offset)
+        kv = self.rope(kv[:, None], offset)
         if local is not None:
             kv, _ = local.update_and_fetch(kv, mx.zeros((B, 1, L, 0), dtype=x.dtype))
         pooled = self.compressor(x, pool, offset)
@@ -513,7 +538,7 @@ class HCAAttention(CompressedAttention):
                 )
         if self._banded(L, kv.shape[2] - L, local, mask, pooled, pool_mask):
             out = self._banded_attention(q, kv, pooled, pool_mask)
-            return self._output(out, qr, offset)
+            return self.rope(out, offset, inverse=True).transpose(0, 2, 1, 3)
         mask = _align_local_mask(mask, kv.shape[2])
         if pooled.shape[1]:
             if mask is None and pool_mask is not None:
@@ -529,11 +554,7 @@ class HCAAttention(CompressedAttention):
             mask=mask,
             sinks=self.attn_sink.astype(q.dtype),
         )
-        return self._output(out, qr, offset)
-
-    def _output(self, out, qr, offset):
-        out = self.rope(out, offset, inverse=True).transpose(0, 2, 1, 3)
-        return self._project(out, qr)
+        return self.rope(out, offset, inverse=True).transpose(0, 2, 1, 3)
 
     def _project(self, out, qr):
         """Mix the heads of ``out`` (B, L, heads, D) and project them out."""
@@ -643,6 +664,15 @@ _INDEX_ROWS = 512
 
 
 class Indexer(nn.Module):
+    # Sum the heads' scores in one pass. The composed form makes several
+    # passes over heads x keys values, which for a decode step at 30K tokens
+    # of context costs more than the rest of the layer.
+    kernel_scores = True
+    # Per-head scores (rows x heads x keys) one ranking pass may hold. A chunk
+    # that needs more is ranked a block of rows at a time, each block finished
+    # before the next, so the working memory stops growing with the context.
+    score_elements = 1 << 31
+
     def __init__(self, config):
         super().__init__()
         self.heads = config.index_n_heads
@@ -669,7 +699,7 @@ class Indexer(nn.Module):
         """
         B, _, L, _ = q.shape
         S = k.shape[2]
-        if _index_kernel is None or self.training or L <= DECODE_BLOCK_SIZE:
+        if _index_kernel is None or self.training or not self.kernel_scores:
             scores = mx.maximum(q @ k.swapaxes(-1, -2), 0).astype(mx.float32)
             return (scores * weights.transpose(0, 2, 1)[..., None]).sum(
                 axis=1, keepdims=True
@@ -693,6 +723,25 @@ class Indexer(nn.Module):
                 )[0].reshape(B, 1, rows, S)
             )
         return parts[0] if len(parts) == 1 else mx.concatenate(parts, axis=2)
+
+    def _ranked(self, q, k, weights, mask, start, rows, L, S):
+        """Ranked key ids for ``rows`` queries from ``start``, and which are real.
+
+        Returns ``(ids, ranked)``, both (rows, topk). Only keys older than a
+        query's recent window are ranked; the causal diagonal of query ``j``
+        is physical column ``S - L + j``.
+        """
+        queries = mx.arange(S - L + start, S - L + start + rows)
+        valid = mx.arange(S)[None, :] - queries[:, None] <= -self.window
+        if mask is not None:
+            valid = valid & mask[..., start : start + rows, :]
+        scores = self._scores(
+            q[:, :, start : start + rows], k, weights[:, start : start + rows]
+        )
+        scores = mx.where(valid, scores, -mx.inf)
+        ids = mx.argpartition(-scores, kth=self.topk - 1, axis=-1)[..., : self.topk]
+        ranked = mx.take_along_axis(scores, ids, axis=-1) > -mx.inf
+        return ids[0, 0], ranked[0, 0]
 
     def __call__(self, x, qr, mask, cache=None, gather=False):
         """Pick the keys each query attends to.
@@ -718,21 +767,25 @@ class Indexer(nn.Module):
         S = k.shape[2]
         if S <= self.topk + self.window:
             return mask, None
-        # Physical cache columns include batch left padding; the causal diagonal
-        # is still S-L+j. Always include the recent window, rank only older keys.
-        delta = mx.arange(S)[None, :] - mx.arange(S - L, S)[:, None]
-        older = delta <= -self.window
-        valid = older if mask is None else older & mask
         weights = (
             self.weights_proj(x).astype(mx.float32) * (self.heads * self.dim) ** -0.5
         )
-        scores = mx.where(valid, self._scores(q, k, weights), -mx.inf)
-        ids = mx.argpartition(-scores, kth=self.topk - 1, axis=-1)[..., : self.topk]
         if gather:
+            block = max(DECODE_BLOCK_SIZE, self.score_elements // (self.heads * S))
+            if block >= L:
+                ids, ranked = self._ranked(q, k, weights, mask, 0, L, L, S)
+            else:
+                parts = []
+                for start in range(0, L, block):
+                    rows = min(block, L - start)
+                    part = self._ranked(q, k, weights, mask, start, rows, L, S)
+                    mx.eval(part)
+                    parts.append(part)
+                ids = mx.concatenate([part[0] for part in parts], axis=0)
+                ranked = mx.concatenate([part[1] for part in parts], axis=0)
             # A query early in the context has fewer than topk older keys; the
             # rest of its ranked slots hold keys it must not see, and its
             # window may start before the first key.
-            ranked = mx.take_along_axis(scores, ids, axis=-1) > -mx.inf
             recent = (
                 mx.arange(S - L, S)[:, None] - mx.arange(self.window - 1, -1, -1)[None]
             )
@@ -740,12 +793,19 @@ class Indexer(nn.Module):
             recent = mx.maximum(recent, 0)
             if mask is not None:
                 inside = inside & mx.take_along_axis(
-                    mx.broadcast_to(mask, scores.shape)[0, 0], recent, axis=-1
+                    mx.broadcast_to(mask, (B, 1, L, S))[0, 0], recent, axis=-1
                 )
             return None, (
-                mx.concatenate((ids[0, 0], recent), axis=-1),
-                mx.concatenate((ranked[0, 0], inside), axis=-1),
+                mx.concatenate((ids, recent), axis=-1),
+                mx.concatenate((ranked, inside), axis=-1),
             )
+        # Physical cache columns include batch left padding; the causal diagonal
+        # is still S-L+j. Always include the recent window, rank only older keys.
+        delta = mx.arange(S)[None, :] - mx.arange(S - L, S)[:, None]
+        older = delta <= -self.window
+        valid = older if mask is None else older & mask
+        scores = mx.where(valid, self._scores(q, k, weights), -mx.inf)
+        ids = mx.argpartition(-scores, kth=self.topk - 1, axis=-1)[..., : self.topk]
         recent = (delta <= 0) & (delta > -self.window)
         sparse = mx.put_along_axis(
             mx.zeros(scores.shape, dtype=mx.bool_), ids, mx.array(True), axis=-1
@@ -763,8 +823,10 @@ class Indexer(nn.Module):
 class MLAAttention(nn.Module):
     # Attend long single-row chunks over each query's selected keys only.
     gathered_keys = True
-    # Context length from which gathering beats the dense product.
+    # Context length from which gathering beats the dense product, for
+    # chunks and for verify blocks.
     gathered_min_keys = 6144
+    gathered_min_keys_short = 4096
     gathered_rows = 512
 
     def __init__(self, config):
@@ -797,18 +859,48 @@ class MLAAttention(nn.Module):
         self.rope = nn.RoPE(self.rope_dim, traditional=True, base=config.rope_theta)
 
     def __call__(self, x, cache=None):
+        qr, q, kv, k_pe = self._queries(x)
+        return self._finish(self._attend(x, qr, q, kv, k_pe, cache), qr)
+
+    def rows(self, x, caches, bounds):
+        """Several requests' blocks in ``x`` (1, N, D); see ``HCAAttention.rows``."""
+        qr, q, kv, k_pe = self._queries(x)
+        out = [
+            self._attend(
+                x[:, s:e], qr[:, s:e], q[:, s:e], kv[:, s:e], k_pe[:, s:e], cache
+            )
+            for cache, (s, e) in zip(caches, bounds)
+        ]
+        return self._finish(mx.concatenate(out, axis=1), qr)
+
+    def _queries(self, x):
+        """The projections that need no position: ``(qr, q, kv, k_pe)``."""
+        B, L, _ = x.shape
+        qr = self.q_a_layernorm(_linear(self.q_a_proj, x))
+        q = _linear(self.q_b_proj, qr).reshape(B, L, self.heads, -1)
+        kv, k_pe = mx.split(_linear(self.kv_a_proj_with_mqa, x), [self.latent], axis=-1)
+        return qr, q, self.kv_a_layernorm(kv), k_pe
+
+    def _finish(self, out, qr):
+        """Mix the heads of ``out`` (B, L, heads, D) and project them out."""
+        out = self.vha(out).flatten(-2)
+        return _parallel_output(
+            self.wo_b,
+            out * mx.sigmoid(_linear(self.o_gate, qr)),
+            self.vha.sharding_group,
+        )
+
+    def _attend(self, x, qr, q, kv, k_pe, cache=None):
+        """One request's rows over its own cache: (B, L, heads, value_dim)."""
         B, L, _ = x.shape
         latent_cache = cache[0] if cache is not None else None
         index_cache = cache[1] if cache is not None else None
         offset = latent_cache.offset if latent_cache is not None else 0
         offset = mx.array(offset) if isinstance(offset, mx.array) else offset
         mask = create_attention_mask(x, latent_cache, return_array=True)
-        qr = self.q_a_layernorm(_linear(self.q_a_proj, x))
-        q = _linear(self.q_b_proj, qr).reshape(B, L, self.heads, -1)
         q = q.transpose(0, 2, 1, 3)
         q_nope, q_pe = mx.split(q, [self.nope], axis=-1)
-        kv, k_pe = mx.split(_linear(self.kv_a_proj_with_mqa, x), [self.latent], axis=-1)
-        kv = self.kv_a_layernorm(kv)[:, None]
+        kv = kv[:, None]
         q_pe = self.rope(q_pe, offset)
         k_pe = self.rope(k_pe[:, None], offset)
         if latent_cache is not None:
@@ -817,12 +909,7 @@ class MLAAttention(nn.Module):
         mask, indices = self.indexer(x, qr, mask, index_cache, gather=gathered)
         if gathered:
             out = self._gathered_attention(q_nope, q_pe, kv, k_pe, *indices)
-            out = self.vha(out.transpose(0, 2, 1, 3)).flatten(-2)
-            return _parallel_output(
-                self.wo_b,
-                out * mx.sigmoid(_linear(self.o_gate, qr)),
-                self.vha.sharding_group,
-            )
+            return out.transpose(0, 2, 1, 3)
         if indices is not None:
             take = indices[:, :, 0, :, None]
             kv = mx.take_along_axis(kv, take, axis=2)
@@ -852,12 +939,7 @@ class MLAAttention(nn.Module):
         )
         if folded:
             out = self.unembed_out(out)
-        out = self.vha(out.transpose(0, 2, 1, 3)).flatten(-2)
-        return _parallel_output(
-            self.wo_b,
-            out * mx.sigmoid(_linear(self.o_gate, qr)),
-            self.vha.sharding_group,
-        )
+        return out.transpose(0, 2, 1, 3)
 
     def _gathered(self, B, L, S, latent_cache):
         """Whether this call attends over gathered keys instead of all of them.
@@ -870,7 +952,12 @@ class MLAAttention(nn.Module):
         """
         if not self.gathered_keys or self.training or B != 1:
             return False
-        if L <= DECODE_BLOCK_SIZE or S < self.gathered_min_keys:
+        # One query takes its keys through the indexer's own list; a verify
+        # block gathers like a chunk does, from a shorter context on.
+        short = L <= DECODE_BLOCK_SIZE
+        if L == 1 or S < (
+            self.gathered_min_keys_short if short else self.gathered_min_keys
+        ):
             return False
         if S <= self.indexer.topk + self.indexer.window:
             return False
@@ -976,16 +1063,19 @@ class DecoderLayer(nn.Module):
         h = self.ffn(h) if router_bias is None else self.ffn(h, router_bias)
         return expand(h, x, post, comb)
 
-    def short(self, x, cache=None, pending=None):
+    def short(self, x, cache=None, pending=None, bounds=None):
         """A decode or verify block, with the last expand left to the caller.
 
         ``pending`` is the ``(h, post, comb)`` of the sublayer before this
         layer, not yet expanded into ``x``. Returns the stream this layer's
         feed-forward read and its own pending expand, so that every expand
         runs in the same launch as the projection that follows it.
+
+        With ``bounds`` the rows are several requests' blocks and ``cache``
+        holds one layer cache per request.
         """
         x, h, post, comb = _hc_boundary(self.attn_hc, self.attn_norm, x, pending)
-        h = self.attn(h, cache)
+        h = self.attn(h, cache) if bounds is None else self.attn.rows(h, cache, bounds)
         x, h, post, comb = _hc_boundary(self.ffn_hc, self.ffn_norm, x, (h, post, comb))
         return x, (self.ffn(h), post, comb)
 
@@ -1042,6 +1132,33 @@ class ErnieModel(nn.Module):
         if skip_final_norm:
             return h
         return self.norm(self.hc_head(h))
+
+    def rows(self, inputs, caches, bounds, capture=(), capture_sink=None):
+        """Several requests' decode or verify blocks in one pass.
+
+        ``inputs`` (1, N) holds the requests' tokens one after another, at
+        most ``DECODE_BLOCK_SIZE`` in all; ``bounds[r]`` is where request
+        ``r``'s lie and ``caches[r]`` is its own cache. Everything but the
+        attention is token-wise, so it runs once over all N rows as it would
+        for one request's block of that size. Returns the streams
+        (1, N, hc_mult, D) before the final norm.
+        """
+        h = self.embed_tokens(inputs)
+        h = mx.broadcast_to(
+            h[:, :, None, :], (*h.shape[:2], self.config.hc_mult, h.shape[-1])
+        )
+        last = len(self.layers) - 1
+        pending = None
+        for index, layer in enumerate(self.layers):
+            layer_caches = [cache[index] for cache in caches]
+            h, pending = layer.short(h, layer_caches, pending, bounds)
+            if index in capture or index == last:
+                h = _hc_expand_decode(pending[0], h, pending[1], pending[2])
+                pending = None
+            _submit(index, layer_caches, h, *(pending or ()))
+            if index in capture:
+                capture_sink.append(h.mean(axis=2))
+        return h
 
 
 class MultiMax(nn.Module):
@@ -1168,6 +1285,53 @@ class LanguageModel(nn.Module):
 
     def rollback_speculative_cache(self, caches, gdn_states, accepted, block_size):
         return rollback_speculative_cache(caches, gdn_states, accepted, block_size)
+
+    # Rows one ``speculative_verify_rows`` forward can hold.
+    verify_rows_limit = DECODE_BLOCK_SIZE
+
+    def speculative_verify_rows(self, inputs, caches, capture_layer_ids=None):
+        """Verify several requests' blocks in one forward.
+
+        ``inputs[r]`` is request ``r``'s block (1, R_r) and ``caches[r]`` its
+        own cache; the blocks may differ in length. A forward mostly costs the
+        weights it reads, and one forward over all the rows reads them once.
+        No request sees another's keys, so nothing is padded and each cache
+        commits or rolls back on its own.
+
+        Returns, per request, ``(logits, captured, transaction)``: the logits
+        (1, R_r, vocab), the outputs of ``capture_layer_ids`` as a list of
+        (1, R_r, D), and the open cache transaction to commit.
+        """
+        lengths = [int(block.shape[1]) for block in inputs]
+        if not lengths or min(lengths) < 1 or sum(lengths) > self.verify_rows_limit:
+            raise ValueError(
+                f"Expected 1 to {self.verify_rows_limit} rows in all, got {lengths}"
+            )
+        bounds, start = [], 0
+        for length in lengths:
+            bounds.append((start, start + length))
+            start += length
+        transactions = []
+        try:
+            for cache, length in zip(caches, lengths):
+                transactions.append(start_speculative_cache(cache, length))
+            sink = [] if capture_layer_ids else None
+            h = self.model.rows(
+                mx.concatenate(inputs, axis=1),
+                caches,
+                bounds,
+                set(capture_layer_ids or ()),
+                sink,
+            )
+            logits = self._project_logits(self.model.norm(self.model.hc_head(h)))
+        except BaseException:
+            for transaction in transactions:
+                transaction.abort()
+            raise
+        return [
+            (logits[:, s:e], [part[:, s:e] for part in sink or ()], transaction)
+            for (s, e), transaction in zip(bounds, transactions)
+        ]
 
     @property
     def layers(self):

@@ -2862,6 +2862,8 @@ class VLMBatchedEngine(BaseEngine):
         block_size = None
         if self._model_settings is not None:
             block_size = getattr(self._model_settings, "vlm_mtp_draft_block_size", None)
+        if block_size is None:
+            block_size = getattr(drafter, "default_block_size", None)
         scheduler = None
         if self._engine is not None and hasattr(self._engine, "engine"):
             scheduler = getattr(self._engine.engine, "scheduler", None)

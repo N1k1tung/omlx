@@ -36,13 +36,16 @@ generated tokens.
 
 from __future__ import annotations
 
+import json
 import logging
+from pathlib import Path
 from typing import Any, Callable, Generator, List, Optional, Set, Union
 
 import mlx.core as mx
 import mlx.nn as nn
 from mlx_vlm.speculative import common as _vlm_common  # noqa: E402, I001
 from mlx_vlm.speculative import load_drafter as _vlm_load_drafter  # noqa: E402
+from mlx_vlm.speculative.dflash import _dflash_rounds  # noqa: E402, SLF001
 from mlx_vlm.speculative.mtp import _buffer_mtp_target_cache
 
 # The round loops dispatch their target-verify and cache-rollback forwards
@@ -63,8 +66,38 @@ from ..patches.mlx_vlm_mtp import apply_external_mtp_runtime_patch  # noqa: E402
 from ..patches.qwen35_verify_qmm import set_verify_qmm_armed  # noqa: E402
 from ..utils.metal_sync import _sync_and_clear_cache  # noqa: E402
 from ..utils.model_loading import materialize_lazy_state  # noqa: E402
+from .block_rows import SharedBlockRounds  # noqa: E402
 
 _vlm_generation_stream = _vlm_common.generation_stream
+
+# Block drafters (``draft_kind="dflash"``) served through mlx-vlm's own round
+# loop instead of Lightning MTP. ERNIE 5.5 Flash Preview's bundled DSpark head
+# verifies through the model's cache transactions, which only that loop drives.
+BLOCK_DRAFTER_MODEL_TYPES = frozenset({"ernie5_5_dspark"})
+_BUNDLED_BLOCK_DRAFT_TARGETS = frozenset({"ernie5_5_moe"})
+# Rounds between buffer-pool drains on the block-drafter path.
+_BLOCK_DRAFT_CLEAR_ROUNDS = 64
+# Largest block (anchor + proposals) drafted when the model settings leave it
+# unset. mlx-vlm's own default verifies a single proposal per round. The ERNIE
+# drafter chooses each round's depth from the request's acceptance so far, up
+# to this ceiling, so the trained block size is the right default.
+_BLOCK_DRAFT_DEFAULT_BLOCK = 8
+
+
+def bundled_block_drafter_path(model_path: Any) -> Optional[str]:
+    """``model_path`` when the checkpoint bundles a block drafter served here."""
+    try:
+        config = json.loads((Path(model_path) / "config.json").read_text())
+    except (OSError, TypeError, ValueError):
+        return None
+    if not isinstance(config, dict):
+        return None
+    text = config.get("text_config") or config
+    if text.get("model_type") not in _BUNDLED_BLOCK_DRAFT_TARGETS:
+        return None
+    if not text.get("dspark_target_layer_ids"):
+        return None
+    return str(model_path)
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +115,12 @@ class VLMMTPDrafter:
         self.model = model
         self.draft_kind = draft_kind
         self.source_path = source_path
+        self.default_block_size = (
+            _BLOCK_DRAFT_DEFAULT_BLOCK if draft_kind == "dflash" else None
+        )
+        # Rounds shared by the requests drafting at the moment, when the
+        # target can verify their blocks in one forward (shared_block_rounds).
+        self.shared_rounds: SharedBlockRounds | None = None
 
 
 class _VLMAdapterMTPProxy:
@@ -186,6 +225,40 @@ class _MTPResetBindingProxy:
         return self._drafter.reset(target_model, *args, **kwargs)
 
 
+def shared_block_rounds(
+    drafter: VLMMTPDrafter,
+    target_language_model: Any,
+    draft_block_size: int | None = None,
+) -> SharedBlockRounds | None:
+    """The rounds that requests drafting with ``drafter`` share, or None.
+
+    None means the target verifies one request per forward or the drafter
+    holds one request's state, and mlx-vlm's own loop serves the request.
+    The rounds are built on first use and kept while requests are in them.
+    """
+    if getattr(drafter, "draft_kind", None) != "dflash":
+        return None
+    rounds = getattr(drafter, "shared_rounds", None)
+    if (
+        rounds is not None
+        and rounds.adapter is target_language_model
+        and (rounds.rows or rounds.block_size == draft_block_size)
+    ):
+        return rounds
+    target, draft_model = target_language_model, drafter.model
+    adapter_lm = getattr(target_language_model, "_language_model", None)
+    if adapter_lm is not None:
+        target = _VLMAdapterMTPProxy(target_language_model, adapter_lm)
+        draft_model = _MTPResetBindingProxy(drafter.model, target)
+    if not SharedBlockRounds.supported(target, draft_model):
+        return None
+    rounds = SharedBlockRounds(target, draft_model, block_size=draft_block_size)
+    rounds.adapter = target_language_model
+    rounds.block_size = draft_block_size
+    drafter.shared_rounds = rounds
+    return rounds
+
+
 def vlm_mtp_positioned_sampling_available(target_language_model: Any) -> bool:
     """True when mlx-vlm's round loop will see ``speculative_logits_from_hidden``.
 
@@ -237,17 +310,20 @@ def load_vlm_mtp_drafter(path: str) -> Optional[VLMMTPDrafter]:
         )
         return None
 
-    if resolved_kind != "mtp":
+    model_type = _read_model_type(drafter_model)
+    block_drafter = (
+        resolved_kind == "dflash" and model_type in BLOCK_DRAFTER_MODEL_TYPES
+    )
+    if resolved_kind != "mtp" and not block_drafter:
         logger.warning(
             "VLM MTP drafter %r resolved to kind=%r (expected 'mtp') — "
             "toggle will be ignored. Only MTP-kind drafters "
-            "(gemma4_assistant, qwen3_5_mtp, etc.) are supported.",
+            "(gemma4_assistant, qwen3_5_mtp, etc.) and the ERNIE 5.5 DSpark "
+            "head are supported.",
             path,
             resolved_kind,
         )
         return None
-
-    model_type = _read_model_type(drafter_model)
 
     # Materialize frozen buffers (RoPE freqs, masked_embedding tables, etc.) on
     # the loader thread. mlx-vlm's load_model only materializes parameters via
@@ -294,13 +370,26 @@ def run_vlm_mtp_decode(
     token_dtype: mx.Dtype = mx.int32,
     eos_token_ids: Optional[Set[int]] = None,
     stop_check: Optional[Callable[[int, int], bool]] = None,
+    greedy: bool = False,
+    history: Optional[List[int]] = None,
 ) -> Generator[Union[int, List[Optional[int]]], None, None]:
     """Stream decoded tokens via mlx-vlm's MTP rounds.
+
+    A block drafter (``drafter.draft_kind == "dflash"``) runs mlx-vlm's DFlash
+    rounds instead: ``hidden`` is then the concatenated target-layer captures
+    of the committed positions, and ``greedy`` selects exact-match verify.
+    ``history`` (the prompt's token ids) lets a drafter that supports it
+    draft by copying text the reply repeats from the request.
 
     Yields plain Python ints for single-request decode (``first_bonus`` is
     ``int`` or a B=1 ``mx.array``), or ``List[Optional[int]]`` rows for
     batched decode (B > 1 ``mx.array``). ``None`` slots in the batched
     form mark rows that have finished.
+
+    A block drafter whose target verifies several requests in one forward
+    (ERNIE 5.5 Flash) yields ``List[int]`` instead: this request's tokens of
+    one round, in order. Requests decoding at the same time share each round's
+    verify forward (see ``block_rows``).
 
     The wrapper yields ``first_bonus`` as its first value: mlx-vlm's
     ``_mtp_rounds`` / ``_mtp_rounds_batch`` expect the caller to have
@@ -322,6 +411,72 @@ def run_vlm_mtp_decode(
             hidden = _head_input(target_language_model, hidden)
 
     is_batch = isinstance(first_bonus, mx.array) and first_bonus.size > 1
+    if getattr(drafter, "draft_kind", None) == "dflash":
+        if is_batch:
+            raise ValueError("Block drafters decode one request at a time")
+        first_bonus_int = int(
+            first_bonus.item() if isinstance(first_bonus, mx.array) else first_bonus
+        )
+        shared = shared_block_rounds(drafter, target_language_model, draft_block_size)
+        if shared is not None:
+            stream = shared.add(
+                prompt_cache,
+                hidden,
+                first_bonus_int,
+                max_tokens,
+                sampler,
+                greedy=greedy,
+                history=history,
+            )
+            try:
+                yield from stream
+            finally:
+                stream.close()
+            return
+        # The drafter follows the request's tokens: the prompt, then every
+        # committed token before the round that drafts after it.
+        begin = getattr(drafter.model, "begin_request", None)
+        observe = getattr(drafter.model, "observe", None)
+        if callable(begin):
+            begin(history)
+        if not callable(observe):
+            observe = None
+        if observe is not None:
+            observe(first_bonus_int)
+        yield first_bonus_int
+        rounds = _dflash_rounds(
+            target_for_rounds,
+            drafter_model,
+            prompt_cache,
+            hidden,
+            first_bonus=first_bonus_int,
+            max_tokens=max_tokens,
+            sampler=sampler,
+            draft_block_size=draft_block_size,
+            token_dtype=token_dtype,
+            use_model_initial_block_size=False,
+            greedy_sampling=greedy,
+        )
+        # Releasing the buffer pool makes the next round allocate the target's
+        # verify buffers again: on ERNIE 5.5 Flash that costs about as much as
+        # the round itself, whether it happens per token or per round. Drain
+        # every few dozen rounds instead, which still bounds the pool.
+        cleared_at = 0
+        try:
+            for tok, _ in rounds:
+                # ``reset`` rebinds the list, so read it through the model.
+                finished = len(drafter.model.accept_lens)
+                if finished - cleared_at >= _BLOCK_DRAFT_CLEAR_ROUNDS:
+                    _sync_and_clear_cache(_vlm_generation_stream)
+                    cleared_at = finished
+                if observe is not None:
+                    observe(tok)
+                yield tok
+        finally:
+            close = getattr(rounds, "close", None)
+            if close is not None:
+                close()
+        return
     clear_before_replay = qwen_drafter and not is_batch
     if clear_before_replay:
         if not isinstance(drafter_model, _MTPResetBindingProxy):

@@ -26,7 +26,7 @@ import pytest
 
 import omlx.scheduler as scheduler_mod
 from omlx.request import RequestStatus
-from omlx.scheduler import Scheduler
+from omlx.scheduler import Scheduler, _VLMMTPDecodeState
 
 
 def _make_fixture(monkeypatch, drafter_returns_uid):
@@ -162,6 +162,35 @@ def test_insert_prefilled_forwards_logits_processors_to_route(monkeypatch):
     Scheduler._insert_prefilled_request(sched, request, state, scheduled)
 
     assert calls["route_lps"] is sentinel
+
+
+def test_vlm_mtp_emits_verified_block_in_order_up_to_stop():
+    prompt_cache = [object()]
+    state = _VLMMTPDecodeState(
+        generator=(block for block in ([101, 102, 103, 104],)),
+        request=SimpleNamespace(),
+        prompt_cache=prompt_cache,
+        sampler=lambda logits: logits,
+        state_machine=None,
+        max_tokens=8,
+        stop_token_ids={103},
+    )
+    sched = SimpleNamespace(
+        _vlm_mtp_active={-7: state},
+        _stream=mx.default_stream(mx.default_device()),
+        _log_vlm_mtp_stats=lambda *_: None,
+    )
+
+    responses = Scheduler._step_vlm_mtp(sched)
+
+    assert [(r.uid, r.token, r.finish_reason) for r in responses] == [
+        (-7, 101, None),
+        (-7, 102, None),
+        (-7, 103, "stop"),
+    ]
+    assert responses[-1].prompt_cache is prompt_cache
+    assert state.emitted == 3
+    assert sched._vlm_mtp_active == {}
 
 
 # ---------------------------------------------------------------------------

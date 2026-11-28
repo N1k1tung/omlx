@@ -1169,7 +1169,10 @@ _FP8_TWO_STORE = r"""
 _FP8_NSG = 2
 # Weights each lane multiplies per token row, across its simdgroup's outputs.
 FP8_LANE_WORK = 64
-# Rows a block needs before these kernels beat MLX's.
+# Rows a block needs before these kernels beat MLX's. MLX 0.32.5 reads a
+# block faster in isolation, but in a forward it measured slower at every
+# block size (verify forward of 6 rows 36.1 -> 39.0 ms on an M5 Ultra), and
+# no faster for any one projection shape from four rows up.
 FP8_MIN_ROWS = 3
 
 

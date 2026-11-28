@@ -273,12 +273,10 @@ class _AdmissionEstimate:
 class _VLMMTPDecodeState:
     """Per-request state for vlm_mtp decode that bypasses BatchGenerator.
 
-    The wrapper generator yields plain Python ints (single-request mode).
-    Scheduler iterates it one token per ``step()`` and feeds each token
-    into ``_process_batch_responses`` via a synthesized ``_VLMMTPResponse``.
+    The generator yields individual tokens or a verified block for this request.
     """
 
-    generator: Any  # Generator[int, None, None] from run_vlm_mtp_decode
+    generator: Any
     request: Request
     prompt_cache: list[Any]
     sampler: Callable[[Any], Any]
@@ -11964,6 +11962,16 @@ class Scheduler:
             )
             mtp_sampler = proc_sampler
         last_arr = mx.array(last_tokens)[None]  # (1, len_last)
+        history = list(request.prompt_token_ids or [])
+        # A block drafter reads chosen decoder-layer outputs of every committed
+        # position; an MTP head reads the final hidden state of the last one.
+        block_drafter = getattr(drafter, "draft_kind", None) == "dflash"
+        if block_drafter:
+            forward_kwargs = {
+                "capture_layer_ids": list(drafter.model.config.target_layer_ids)
+            }
+        else:
+            forward_kwargs = {"return_hidden": True, "return_shared_kv": True}
         try:
             with mx.stream(self._stream):
                 set_batch_rope = getattr(target_model, "set_batch_rope_deltas", None)
@@ -11972,8 +11980,7 @@ class Scheduler:
                 out = target_model(
                     last_arr,
                     cache=prefilled_cache,
-                    return_hidden=True,
-                    return_shared_kv=True,
+                    **forward_kwargs,
                 )
                 mx.eval([c.state for c in prefilled_cache])
         except Exception as e:
@@ -12004,14 +12011,18 @@ class Scheduler:
         if proc_sampler is not None:
             proc_sampler.note_first_bonus(int(first_bonus_arr.item()))
 
-        if isinstance(hidden_raw, list):
-            hidden = hidden_raw[-1]
+        if block_drafter:
+            # Every position of this forward seeds the drafter's context.
+            hidden = mx.concatenate(list(hidden_raw), axis=-1)
         else:
-            hidden = hidden_raw
-        # Slice to last position so the drafter sees a [B, 1, H] tensor
-        # regardless of how many tokens this forward processed.
-        if hidden.shape[1] > 1:
-            hidden = hidden[:, -1:, :]
+            if isinstance(hidden_raw, list):
+                hidden = hidden_raw[-1]
+            else:
+                hidden = hidden_raw
+            # Slice to last position so the drafter sees a [B, 1, H] tensor
+            # regardless of how many tokens this forward processed.
+            if hidden.shape[1] > 1:
+                hidden = hidden[:, -1:, :]
 
         # Combine base stop tokens (EOS, Harmony, generation_config) with
         # request-specific stop_token_ids — same shape as _build_state_machine.
@@ -12039,6 +12050,10 @@ class Scheduler:
                 draft_block_size=self._vlm_mtp_draft_block_size,
                 token_dtype=mx.int32,
                 eos_token_ids=eos_ids or None,
+                greedy=not float(
+                    getattr(request.sampling_params, "temperature", 0.0) or 0.0
+                ),
+                history=history if block_drafter else None,
             )
         except Exception as e:
             logger.warning(
@@ -12144,9 +12159,7 @@ class Scheduler:
     def _step_vlm_mtp(self) -> list[_VLMMTPResponse]:
         """Advance every active vlm_mtp generator by one yield.
 
-        Returns the synthesized responses for ``_process_batch_responses``.
-        Mirrors mlx-lm BatchGenerator's per-step contract: one
-        ``GenerationBatch.Response``-shaped object per active uid.
+        Return one response per token for ``_process_batch_responses``.
         """
         if not self._vlm_mtp_active:
             return []
@@ -12180,13 +12193,9 @@ class Scheduler:
                 state.finished = True
                 continue
 
-            # Single-request mode yields ints; batch mode (not yet routed
-            # by omlx) would yield a list. Guard so the path stays robust
-            # if we widen routing later.
             if isinstance(token_val, list):
-                # Take the first row (we only route singles for now).
-                tok = next((t for t in token_val if t is not None), None)
-                if tok is None:
+                tokens = [int(token) for token in token_val if token is not None]
+                if not tokens:
                     responses.append(
                         _VLMMTPResponse(
                             uid=uid,
@@ -12197,36 +12206,38 @@ class Scheduler:
                     )
                     state.finished = True
                     continue
-                token = int(tok)
             else:
-                token = int(token_val)
+                tokens = [int(token_val)]
 
-            state.emitted += 1
-            finish_reason: str | None = None
-            if state.stop_token_ids and token in state.stop_token_ids:
-                finish_reason = "stop"
-            elif state.emitted >= state.max_tokens:
-                finish_reason = "length"
+            for token in tokens:
+                state.emitted += 1
+                finish_reason: str | None = None
+                if token in state.stop_token_ids:
+                    finish_reason = "stop"
+                elif state.emitted >= state.max_tokens:
+                    finish_reason = "length"
 
-            if finish_reason is not None:
-                self._log_vlm_mtp_stats(state, finish_reason)
+                if finish_reason is not None:
+                    self._log_vlm_mtp_stats(state, finish_reason)
 
-            responses.append(
-                _VLMMTPResponse(
-                    uid=uid,
-                    token=token,
-                    finish_reason=finish_reason,
-                    prompt_cache=(
-                        state.prompt_cache if finish_reason is not None else None
-                    ),
+                responses.append(
+                    _VLMMTPResponse(
+                        uid=uid,
+                        token=token,
+                        finish_reason=finish_reason,
+                        prompt_cache=(
+                            state.prompt_cache if finish_reason is not None else None
+                        ),
+                    )
                 )
-            )
-            if finish_reason is not None:
-                state.finished = True
+                if finish_reason is not None:
+                    state.finished = True
+                    break
 
-        # Drop finished entries.
         for uid in [u for u, s in self._vlm_mtp_active.items() if s.finished]:
-            del self._vlm_mtp_active[uid]
+            close = getattr(self._vlm_mtp_active.pop(uid).generator, "close", None)
+            if callable(close):
+                close()
 
         return responses
 

@@ -2,9 +2,9 @@ from pathlib import Path
 
 import mlx.core as mx
 
-from omlx.patches.mlx_vlm_ernie55_compat import (
+from omlx.patches.mlx_vlm_ernie5_5_compat import (
     _VENDOR_MLX_VLM,
-    apply_mlx_vlm_ernie55_compat_patch,
+    apply_mlx_vlm_ernie5_5_compat_patch,
     is_applied,
 )
 
@@ -16,7 +16,7 @@ CONFIG = {
 
 def _prepare_preview_weights():
     if not is_applied():
-        assert apply_mlx_vlm_ernie55_compat_patch()
+        assert apply_mlx_vlm_ernie5_5_compat_patch()
     from mlx_vlm.models.ernie5_5_moe import ernie5_5_moe
 
     assert str(Path(ernie5_5_moe.__file__).resolve()).startswith(
